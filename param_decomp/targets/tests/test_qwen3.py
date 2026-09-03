@@ -313,3 +313,37 @@ def test_step_trains():
     state, metrics = step(placed, state, tokens, jax.random.PRNGKey(100))
     assert all(jnp.isfinite(jnp.asarray(v)).all() for v in metrics.values())
     assert int(state.training.step) == 1
+
+
+def test_stacked_qk_norm_shardings_accept_the_layer_axis():
+    """REGRESSION: `Qwen3FrozenAttn.shardings` must track the projections' stacking.
+
+    `_stack_layers` gives every frozen array a leading `layer` axis, and the base
+    `FrozenAttn.shardings` accepts both `("d_out","d_in")` and
+    `("layer","d_out","d_in")`. The QK-norm override previously hardcoded rank-1
+    `("head_dim",)`, so it asserted `1 != 2` against the stacked `(n_layer, head_dim)`
+    norms — which every real Qwen3 run hits, since placement runs on the stacked model.
+    """
+    import numpy as np
+    from jax.sharding import AxisType, Mesh
+
+    from param_decomp.core.placement import from_config
+
+    cfg = _tiny_qwen_cfg()
+    sites = glu_site_specs(cfg, _QVDOWN_SITE_CS)
+    model = _tiny_decomposed_qwen(cfg, sites, jax.random.PRNGKey(0))
+
+    # the stacked norms carry the layer axis the override must accept
+    stacked_attn = model.stacked.attn
+    assert isinstance(stacked_attn, Qwen3FrozenAttn)
+    assert stacked_attn.q_norm.shape == (cfg.n_layer, cfg.head_dim)
+    assert stacked_attn.k_norm.shape == (cfg.n_layer, cfg.head_dim)
+
+    mesh = Mesh(
+        np.array(jax.devices()[:1]).reshape(1, 1, 1),
+        ("replicate", "fsdp", "tp"),
+        axis_types=(AxisType.Explicit,) * 3,
+    )
+    rules = from_config("zero1", mesh, model.sites)
+    placed = model.shardings(rules)  # previously raised AssertionError
+    assert placed is not None

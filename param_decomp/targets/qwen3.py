@@ -160,10 +160,16 @@ class Qwen3FrozenAttn(FrozenAttn):
 
     @override
     def shardings(self, placement: PlacementRules, axes: Axes) -> "Qwen3FrozenAttn":
-        """The shared projection layout plus declared norm-vector placement."""
+        """The shared projection layout plus declared norm-vector placement.
+
+        The QK-norm vectors carry ONE `head_dim` axis per matrix, so they track the
+        projections' stacking: `(head_dim,)` unstacked, `(layer, head_dim)` under the
+        stacked layout `_stack_layers` builds. Derive that from the same `axes` the
+        base class validates rather than hardcoding a rank, so the two cannot drift.
+        """
         placed = super().shardings(placement, axes)
         assert isinstance(placed, Qwen3FrozenAttn)
-        norm_axes: Axes = ("head_dim",)
+        norm_axes: Axes = ("layer", "head_dim") if axes[0] == "layer" else ("head_dim",)
         placement.target.normalization.validate_shape(norm_axes, self.q_norm.shape)
         placement.target.normalization.validate_shape(norm_axes, self.k_norm.shape)
         norm = placement.target.normalization.sharding_for(norm_axes)
