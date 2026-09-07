@@ -297,6 +297,72 @@ def make_ce_kl_step[PreparedT](
     return filter_jit(eval_step, compiler_options=compiler_options)
 
 
+def hard_top_k_mask(scores: Array, k: Array, mesh: Mesh | None = None) -> Array:
+    """Select exactly k entries on the last axis, with stable component-index ties."""
+    original_sharding = jax.typeof(scores).sharding
+    sortable = batch_shard_leading(scores, mesh) if mesh is not None else scores
+    # Global top-k is defined over C, so C must be replicated for the sort when TP is
+    # present. Restore the component-sharded activation layout before masked_forward.
+    order = jnp.argsort(sortable, axis=-1, stable=True)
+    ranks = jnp.argsort(order, axis=-1, stable=True)
+    mask = (ranks >= scores.shape[-1] - k).astype(COMPUTE_DT)
+    return jax.sharding.reshard(mask, original_sharding) if mesh is not None else mask
+
+
+def make_hard_top_k_ce_kl_step[PreparedT](
+    model_static: PlacedModel[PreparedT],
+    ci_capture_keys: CaptureKeys,
+    ks: tuple[int, ...],
+    mesh: Mesh | None = None,
+    compiler_options: dict[str, bool | int | str] | None = None,
+    *,
+    n_valid_rows: int | None = None,
+) -> ScalarStep:
+    """Build exact-k binary reconstructions from the learned CI ranking at each token."""
+    assert model_static.has_position_axis, (
+        "HardTopKCEandKLLosses is LM-only and requires a position axis"
+    )
+    assert len(ks) == len(set(ks)), f"hard top-k values must be unique: {ks}"
+    for site in model_static.sites:
+        assert max(ks) <= site.C, f"hard top-k max {max(ks)} exceeds {site.name} C={site.C}"
+
+    def eval_step(
+        model: PlacedModel[PreparedT],
+        components: ComponentStacks,
+        placed_ci_fn: PlacedCIFn,
+        token_ids: Array,
+        key: PRNGKeyArray,
+    ) -> dict[str, Array]:
+        del key
+        batch = _prepare_lm_batch(
+            model,
+            components,
+            placed_ci_fn,
+            token_ids,
+            mesh,
+            n_valid_rows,
+            ci_capture_keys,
+        )
+        zeros_delta = {
+            site: jnp.zeros_like(batch.tokens, dtype=COMPUTE_DT) for site in model.site_names
+        }
+        target_ce = _ce(batch, batch.clean.output)
+
+        def evaluate_k(k: Array) -> tuple[Array, Array]:
+            masks = {site: hard_top_k_mask(ci, k, mesh) for site, ci in batch.ci_lower.items()}
+            logits = _compute_masked_output(model, batch, masks, zeros_delta, mesh, frozenset())
+            return _kl(batch, logits), _ce(batch, logits) - target_ce
+
+        kls, ce_differences = jax.lax.map(evaluate_k, jnp.asarray(ks, dtype=jnp.int32))
+        metrics = {f"hard_top_k/kl_k{k}": kls[i] for i, k in enumerate(ks)}
+        metrics.update(
+            {f"hard_top_k/ce_difference_k{k}": ce_differences[i] for i, k in enumerate(ks)}
+        )
+        return metrics
+
+    return filter_jit(eval_step, compiler_options=compiler_options)
+
+
 def make_ci_l0_step[PreparedT](
     model_static: PlacedModel[PreparedT],
     ci_capture_keys: CaptureKeys,

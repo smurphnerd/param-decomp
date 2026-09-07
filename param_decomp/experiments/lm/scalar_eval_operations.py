@@ -17,8 +17,12 @@ from param_decomp.experiments.lm.eval import (
     make_ce_kl_step,
     make_ci_l0_step,
     make_fresh_pgd_step,
+    make_hard_top_k_ce_kl_step,
 )
-from param_decomp.experiments.lm.eval_config import CEandKLLossesConfig
+from param_decomp.experiments.lm.eval_config import (
+    CEandKLLossesConfig,
+    HardTopKCEandKLLossesConfig,
+)
 from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
 
@@ -110,6 +114,28 @@ def make_ce_kl_operation(
         schedule,
         scalar_step_for(metric, model, ci_capture_keys, mesh, compiler_options),
         ("ce_kl/",),
+        model,
+        run_key,
+        train_steps,
+        eval_steps,
+    )
+
+
+def make_hard_top_k_ce_kl_operation(
+    metric: HardTopKCEandKLLossesConfig,
+    schedule: EvalSchedule,
+    model: PlacedModel,
+    ci_capture_keys: CaptureKeys,
+    run_key: PRNGKeyArray,
+    train_steps: int,
+    eval_steps: int,
+    mesh: Mesh,
+    compiler_options: dict[str, bool | int | str],
+) -> EvalOperation[LMEvalContext]:
+    return _make_scalar_operation(
+        schedule,
+        make_hard_top_k_ce_kl_step(model, ci_capture_keys, metric.ks, mesh, compiler_options),
+        ("hard_top_k/",),
         model,
         run_key,
         train_steps,

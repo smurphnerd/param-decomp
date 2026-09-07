@@ -31,7 +31,10 @@ from param_decomp.experiments.fast_eval_operations import (
     make_ci_l0_operation,
     make_fresh_pgd_operation,
 )
-from param_decomp.experiments.lm.eval_config import CEandKLLossesConfig
+from param_decomp.experiments.lm.eval_config import (
+    CEandKLLossesConfig,
+    HardTopKCEandKLLossesConfig,
+)
 
 type ToyRun[TargetT: TargetSites] = BuiltRun[None, TargetT, PDConfig]
 type ProbeCI = Callable[[TrainState], dict[str, Array]]
@@ -121,7 +124,7 @@ def make_toy_evaluation_operations(
                     inputs_for_context=well_temperedness_inputs,
                     figure_rendering="synchronous" if wandb_configured else None,
                 )
-            case CEandKLLossesConfig():
+            case CEandKLLossesConfig() | HardTopKCEandKLLossesConfig():
                 raise AssertionError(
                     "CEandKLLosses scores next-token cross-entropy and KL over a categorical "
                     "output distribution; a toy target emits neither tokens nor logits"

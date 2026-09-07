@@ -16,6 +16,14 @@ class CEandKLLossesConfig(BaseConfig):
     rounding_threshold: float
 
 
+class HardTopKCEandKLLossesConfig(BaseConfig):
+    """LM reconstruction after exactly-k binary selection by learned CI rank."""
+
+    slow: ClassVar[bool] = True
+    type: Literal["HardTopKCEandKLLosses"] = "HardTopKCEandKLLosses"
+    ks: tuple[PositiveInt, ...] = Field(min_length=1)
+
+
 class CIMaskedAttnPatternsReconLossConfig(BaseConfig):
     slow: ClassVar[bool] = False
     type: Literal["CIMaskedAttnPatternsReconLoss"] = "CIMaskedAttnPatternsReconLoss"

@@ -279,6 +279,23 @@ The path schemas (`topology/path_schemas.py`) cover the pretrain (`GPT2*`,
 `LlamaSimple*`) and HF GLU (`Llama`, `Qwen3`) architectures used to name harvested
 sites consistently.
 
+## Exact-k LM readout
+
+`HardTopKCEandKLLosses` is a slow, evaluation-only LM metric. For each token and each
+site independently, it ranks the learned lower CI values and replaces them with an
+exact binary mask containing `k` ones. Stable sorting makes ties deterministic. This
+isolates hard selection from training: it is not a straight-through estimator and does
+not change the learned CI function or objective.
+
+```yaml
+- type: HardTopKCEandKLLosses
+  ks: [8, 16, 32, 64]
+```
+
+Each `k` must fit every configured site's C. Results are logged as
+`eval/hard_top_k/{kl,ce_difference}_k{K}`. A multi-site target selects k separately at
+each site; it never pools components across sites.
+
 ## `runtime.launch_env` (rank env / XLA flags)
 
 The rank env (XLA client flags, NCCL/host-memory knobs) is config-driven via

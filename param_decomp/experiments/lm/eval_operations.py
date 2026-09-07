@@ -51,6 +51,7 @@ from param_decomp.experiments.lm.eval_config import (
     ArithmeticCIGridConfig,
     CEandKLLossesConfig,
     CIMaskedAttnPatternsReconLossConfig,
+    HardTopKCEandKLLossesConfig,
     StochasticAttnPatternsReconLossConfig,
 )
 from param_decomp.experiments.lm.eval_context import LMEvalContext
@@ -60,6 +61,7 @@ from param_decomp.experiments.lm.scalar_eval_operations import (
     make_ce_kl_operation,
     make_ci_l0_operation,
     make_fresh_pgd_operation,
+    make_hard_top_k_ce_kl_operation,
 )
 from param_decomp.infra.dataset_store import read_dataset_meta
 from param_decomp.pretrain.batch_data import BatchSchedule, ShardServer, scan_shards
@@ -110,6 +112,18 @@ def make_lm_evaluation(
         match metric:
             case CEandKLLossesConfig():
                 return make_ce_kl_operation(
+                    metric,
+                    schedule,
+                    model,
+                    capture_inputs,
+                    run_key,
+                    pd.steps,
+                    eval.n_steps,
+                    mesh,
+                    compiler_options,
+                )
+            case HardTopKCEandKLLossesConfig():
+                return make_hard_top_k_ce_kl_operation(
                     metric,
                     schedule,
                     model,

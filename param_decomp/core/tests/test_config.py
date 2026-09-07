@@ -34,6 +34,7 @@ from param_decomp.experiments.lm.config import (
 from param_decomp.experiments.lm.eval_config import (
     ArithmeticCIGridConfig,
     CEandKLLossesConfig,
+    HardTopKCEandKLLossesConfig,
 )
 from param_decomp.experiments.lm.resolved import ResolvedLMData
 from param_decomp.targets.glu_transformer import mlp_family_site_cs
@@ -91,6 +92,7 @@ def test_eval_block_maps_slow_tier_and_defers_offline_only_metrics(
         "slow_on_first_step": True,
         "metrics": [
             {"type": "CEandKLLosses", "rounding_threshold": 0.0},
+            {"type": "HardTopKCEandKLLosses", "ks": [4, 8]},
             {"type": "CI_L0", "groups": None, "ci_alive_threshold": 0.0},
             {
                 "type": "PGDReconLoss",
@@ -120,6 +122,10 @@ def test_eval_block_maps_slow_tier_and_defers_offline_only_metrics(
     )
     assert any(
         isinstance(metric, CEandKLLossesConfig) and metric.rounding_threshold == 0.0
+        for metric in cfg.eval.metrics
+    )
+    assert any(
+        isinstance(metric, HardTopKCEandKLLossesConfig) and metric.ks == (4, 8)
         for metric in cfg.eval.metrics
     )
     assert any(

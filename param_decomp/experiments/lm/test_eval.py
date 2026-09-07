@@ -34,7 +34,9 @@ from param_decomp.core.placement import PlacementRules
 from param_decomp.core.recon import OutputAndHiddenActsReconstruction
 from param_decomp.core.recon_eval import FreshPGDReconEval
 from param_decomp.experiments.lm.eval import (
+    hard_top_k_mask,
     make_eval_step,
+    make_hard_top_k_ce_kl_step,
     next_token_cross_entropy,
 )
 from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
@@ -42,6 +44,36 @@ from param_decomp.targets.testing import (
     tiny_glu_cfg,
     tiny_glu_decomposed_lm,
 )
+
+
+def test_hard_top_k_mask_selects_exactly_k_with_deterministic_ties():
+    scores = jnp.array([[0.4, 0.1, 0.4, 0.2], [0.0, 0.0, 0.0, 0.0]])
+    mask = hard_top_k_mask(scores, jnp.asarray(2))
+    assert jnp.array_equal(mask.sum(axis=-1), jnp.array([2, 2]))
+    assert jnp.array_equal(mask[0], jnp.array([1, 0, 1, 0]))
+    assert jnp.array_equal(mask[1], jnp.array([0, 0, 1, 1]))
+
+
+def test_hard_top_k_eval_emits_each_requested_binary_readout():
+    cfg = tiny_glu_cfg()
+    sites = glu_site_specs(cfg, mlp_family_site_cs(4, 5, 8))
+    model = PlacedModel(
+        model=tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0)), placement=None
+    )
+    from param_decomp.core.components import init_component_stacks
+
+    components = init_component_stacks(sites, jax.random.PRNGKey(1))
+    ci_fn = _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2))
+    token_ids = jax.random.randint(jax.random.PRNGKey(3), (2, 8), 0, cfg.vocab_size)
+    step = make_hard_top_k_ce_kl_step(model, ci_fn.fn.capture_keys, (1, 4))
+    metrics = step(model, components, ci_fn, token_ids, jax.random.PRNGKey(5))
+    assert set(metrics) == {
+        "hard_top_k/kl_k1",
+        "hard_top_k/ce_difference_k1",
+        "hard_top_k/kl_k4",
+        "hard_top_k/ce_difference_k4",
+    }
+    assert all(jnp.isfinite(value) for value in metrics.values())
 
 
 def test_row_masked_relative_squared_error_excludes_padding_from_both_sums():

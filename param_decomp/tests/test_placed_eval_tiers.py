@@ -49,7 +49,11 @@ from param_decomp.experiments.lm.attn_patterns_eval import (
     make_ci_attn_patterns_step,
     make_stochastic_attn_patterns_step,
 )
-from param_decomp.experiments.lm.eval import make_ce_kl_step, make_ci_l0_step
+from param_decomp.experiments.lm.eval import (
+    make_ce_kl_step,
+    make_ci_l0_step,
+    make_hard_top_k_ce_kl_step,
+)
 from param_decomp.targets.glu_transformer import glu_site_specs, site_name
 from param_decomp.targets.testing import tiny_glu_cfg, tiny_glu_decomposed_lm
 from param_decomp.targets.transformer_taps import resid_tap_key
@@ -119,6 +123,11 @@ def test_every_placed_eval_tier_traces_and_returns_finite_values():
             model, vu, ci_fn, tokens, key
         )
         assert all(np.isfinite(np.asarray(v)).all() for v in l0.values())
+
+        hard_top_k = make_hard_top_k_ce_kl_step(model, ci_fn.fn.capture_keys, (1, 4), mesh)(
+            model, vu, ci_fn, tokens, key
+        )
+        assert all(np.isfinite(np.asarray(v)).all() for v in hard_top_k.values())
 
         density, ci_sums, n_positions, binned_lower, binned_pre, density_hist = make_slow_eval_step(
             model, ci_fn.fn.capture_keys, 0.1, 8, 16
@@ -214,6 +223,10 @@ def test_eval_steps_keep_the_batch_axis_sharded_in_compiled_hlo():
             "ce_kl": (make_ce_kl_step(model, keys, 0.5, mesh), (model, vu, ci_fn, tokens, key)),
             "ci_l0": (
                 make_ci_l0_step(model, keys, 0.1, None, mesh),
+                (model, vu, ci_fn, tokens, key),
+            ),
+            "hard_top_k": (
+                make_hard_top_k_ce_kl_step(model, keys, (1, 4), mesh),
                 (model, vu, ci_fn, tokens, key),
             ),
             "slow_eval": (make_slow_eval_step(model, keys, 0.1, 8, 16), (model, ci_fn, tokens)),

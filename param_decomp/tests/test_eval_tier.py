@@ -39,6 +39,7 @@ SLOW_METRICS = {
     "CIHistogramsConfig",
     "CIMeanPerComponentConfig",
     "ComponentActivationDensityConfig",
+    "HardTopKCEandKLLossesConfig",
     "IdentityCIErrorConfig",
     "PermutedCIPlotsConfig",
     "StochasticHiddenActsReconLossConfig",
