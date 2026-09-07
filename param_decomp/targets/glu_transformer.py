@@ -1679,7 +1679,12 @@ class GLUDecomposedModel(eqx.Module):
                     attn.wq[start : start + width],
                     per_kind_inputs,
                 )
-                q = frozen_q.at[..., start : start + width].set(q_head)
+                q_update = frozen_q.at[..., start : start + width]
+                q = (
+                    q_update.set(q_head)
+                    if placement is None
+                    else q_update.set(q_head, out_sharding=jax.typeof(frozen_q).sharding)
+                )
             k, ka = execute(h1, anatomy.k, attn.wk, per_kind_inputs)
             v, va = execute(h1, anatomy.v, attn.wv, per_kind_inputs)
             attention_output = attn.core(

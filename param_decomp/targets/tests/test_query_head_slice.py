@@ -5,9 +5,15 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from param_decomp.core.components import SiteC, component_stacks_from_site_arrays
+from param_decomp.core.components import (
+    SiteC,
+    component_stacks_from_site_arrays,
+    init_component_stacks,
+)
 from param_decomp.core.model import MaterializedMasking
 from param_decomp.core.nonlinearity import AttentionHeads
+from param_decomp.core.placement import from_config
+from param_decomp.core.sharding import place_target, shard_batch, single_device_mesh
 from param_decomp.experiments.lm.config import (
     LMDecompositionConfig,
     LMTargetConfig,
@@ -83,6 +89,29 @@ def test_query_head_mask_changes_only_selected_head():
     np.testing.assert_allclose(zeroed_q[:, :, HEAD], 0.0, atol=1e-6)
     for head in (0, 2, 3):
         np.testing.assert_allclose(zeroed_q[:, :, head], clean_q[:, :, head], atol=1e-6)
+
+
+def test_query_head_placed_masked_forward_traces():
+    model = _head_model()
+    mesh = single_device_mesh()
+    rules = from_config("zero1", mesh, model.sites)
+    placed = place_target(model, rules).model
+    tokens = shard_batch(jnp.arange(10).reshape(2, 5), mesh, batch_axis=0)
+    components = init_component_stacks(model.sites, jax.random.PRNGKey(4))
+    masks = {SITE: jnp.ones((2, 5, C))}
+    with jax.set_mesh(mesh):
+        output = jax.jit(
+            lambda m, c, x: (
+                m.masked_forward(
+                    m.prepare_compute_weights(c, rules),
+                    x,
+                    masking=MaterializedMasking(component_masks=masks),
+                    placement=rules,
+                    remat=False,
+                ).output
+            )
+        )(placed, components, tokens)
+    assert output.shape == (2, 5, 64)
 
 
 def _decomposition(head: int) -> LMDecompositionConfig:
