@@ -114,6 +114,29 @@ def test_structural_compat_passes_on_matching_changes_only(tmp_path: Path):
     assert_finetune_structural_compat(new_cfg, prov, DATA_ROOT)
 
 
+def test_structural_compat_fires_on_changed_query_head(tmp_path: Path):
+    raw = yaml.safe_load((CONFIGS / "llama8b_l18_b128_cmp32.yaml").read_text())
+    raw["decomposition"] = dict(
+        raw["decomposition"],
+        sites={
+            "kind": "glu_transformer_q_head",
+            "layer": 18,
+            "head": 3,
+            "C": 512,
+        },
+    )
+    parent_dir = _stamp(raw, tmp_path / "p-0123abcd")
+
+    new_raw = dict(raw)
+    new_raw["decomposition"] = dict(
+        raw["decomposition"], sites=dict(raw["decomposition"]["sites"], head=4)
+    )
+    new_cfg, _ = build_from_schema(new_raw, "p-aaaaaaaa", DATA_ROOT)
+    prov = ResumeProvenance(parent_run_dir=parent_dir, parent_step=10)
+    with pytest.raises(AssertionError, match="fine-tune query-head mismatch"):
+        assert_finetune_structural_compat(new_cfg, prov, DATA_ROOT)
+
+
 def test_structural_compat_fires_on_changed_C(tmp_path: Path):
     raw = yaml.safe_load((CONFIGS / "llama8b_l18_b128_cmp32.yaml").read_text())
     parent_dir = _stamp(raw, tmp_path / "p-0123abcd")

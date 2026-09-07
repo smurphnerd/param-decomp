@@ -55,6 +55,8 @@ def load_decomposed_llama31_from_hf(
     cfg: LlamaConfig,
     sites: tuple[SiteSpec, ...],
     weights_dtype: DTypeLike,
+    *,
+    query_head: int | None = None,
 ) -> GLUDecomposedModel:
     """The Llama-3.1 HF load: plain attention + llama3-rescaled RoPE frequencies."""
     return load_decomposed_glu_from_hf(
@@ -64,4 +66,5 @@ def load_decomposed_llama31_from_hf(
         load_attn=lambda w, i: _load_attn(w, i, cfg),
         weights_dtype=weights_dtype,
         inv_freq=llama3_inv_freq(cfg),
+        query_head=query_head,
     )

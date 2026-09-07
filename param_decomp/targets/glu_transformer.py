@@ -11,7 +11,9 @@ embedding through every layer to the LM head — as array fields, threaded into 
 step as a pytree arg; layers without sites run the plain frozen block.
 
 q/k/v sites are decomposed BEFORE `_prep_qk`/RoPE/SDPA (the masked site output feeds the
-attention math); the o site applies to the attention output. V/U masters are fp32
+attention math); the o site applies to the attention output. A single-query-head q target
+uses the same site identity with one-head U width and replaces only that output slice,
+leaving the other query heads frozen. V/U masters are fp32
 keyed per site (`ComponentStacks`); frozen weights are stored bf16 (SPEC N1) — the trainer
 casts for compute.
 
@@ -406,13 +408,32 @@ def nonlinearity_partition(cfg: GLUArch, kind: str) -> NonlinearityPartition | N
     return anatomy_nonlinearity_partition(GLU_ANATOMY, cfg, kind)
 
 
-def glu_site_specs(cfg: GLUArch, site_cs: tuple[SiteC, ...]) -> tuple[SiteSpec, ...]:
-    return family.site_specs(
-        FAMILY,
-        site_cs,
-        lambda kind: site_dims(cfg, kind),
-        lambda kind: nonlinearity_partition(cfg, kind),
-        cfg.n_layer,
+def glu_site_specs(
+    cfg: GLUArch, site_cs: tuple[SiteC, ...], *, query_head: int | None = None
+) -> tuple[SiteSpec, ...]:
+    if query_head is None:
+        return family.site_specs(
+            FAMILY,
+            site_cs,
+            lambda kind: site_dims(cfg, kind),
+            lambda kind: nonlinearity_partition(cfg, kind),
+            cfg.n_layer,
+        )
+    assert 0 <= query_head < cfg.n_head, (query_head, cfg.n_head)
+    assert len(site_cs) == 1, "a query-head target exposes exactly one site"
+    site = site_cs[0]
+    layer, kind = FAMILY.parse(site.name)
+    assert 0 <= layer < cfg.n_layer, (site.name, cfg.n_layer)
+    assert kind == "q", f"query-head target requires a q site, got {site.name}"
+    return (
+        SiteSpec(
+            name=site.name,
+            d_in=cfg.n_embd,
+            d_out=cfg.head_dim,
+            C=site.C,
+            group="q",
+            nonlinearity_partition=AttentionHeads(1),
+        ),
     )
 
 
@@ -1136,6 +1157,8 @@ class GLUDecomposedModel(eqx.Module):
     has_position_axis: bool = eqx.field(static=True)
     eps: float = eqx.field(static=True)
     n_ctx: int = eqx.field(static=True)
+    query_head: int | None = eqx.field(static=True, default=None)
+    """A sole q site's selected output head; `None` means ordinary whole-matrix sites."""
 
     @property
     def site_names(self) -> tuple[str, ...]:
@@ -1643,10 +1666,22 @@ class GLUDecomposedModel(eqx.Module):
             attn = layer.attn
             execute = site_output_and_component_activation
             h1 = rms_norm(residual_in, layer.ln1, self.eps)
-            q, qa = execute(h1, anatomy.q, attn.wq, per_kind_inputs)
+            column = None if placement is None else placement.target.column
+            if self.query_head is None:
+                q, qa = execute(h1, anatomy.q, attn.wq, per_kind_inputs)
+            else:
+                width = attn.head_dim
+                start = self.query_head * width
+                frozen_q = placed_target_linear(h1, attn.wq, column)
+                q_head, qa = execute(
+                    h1,
+                    anatomy.q,
+                    attn.wq[start : start + width],
+                    per_kind_inputs,
+                )
+                q = frozen_q.at[..., start : start + width].set(q_head)
             k, ka = execute(h1, anatomy.k, attn.wk, per_kind_inputs)
             v, va = execute(h1, anatomy.v, attn.wv, per_kind_inputs)
-            column = None if placement is None else placement.target.column
             attention_output = attn.core(
                 q, k, v, self.inv_freq, None if column is None else column.output
             )
@@ -1952,15 +1987,24 @@ class GLUDecomposedModel(eqx.Module):
         )
         return activations
 
+    def _decomposed_site_weight(self, layer: int, kind: str) -> Array:
+        frozen_weight = _frozen_site_weight(
+            self.anatomy, jax.tree.map(lambda a, li=layer: a[li], self.stacked), kind
+        )
+        if self.query_head is None:
+            return frozen_weight
+        assert kind == self.anatomy.q, kind
+        width = self.stacked.attn.head_dim
+        start = self.query_head * width
+        return frozen_weight[start : start + width]
+
     def target_weight_sq_norms(self) -> dict[str, Array]:
         """Per-slot `‖W_s‖²` of each frozen stack, slot-aligned with `weight_deltas`
         (the S17 relative-error scales, read once at setup)."""
         norms: dict[str, list[Array]] = {}
         for name, group, _slot in site_slots_for(self.sites):
             layer, kind = self.anatomy.family.parse(name)
-            frozen_weight = _frozen_site_weight(
-                self.anatomy, jax.tree.map(lambda a, li=layer: a[li], self.stacked), kind
-            )
+            frozen_weight = self._decomposed_site_weight(layer, kind)
             norms.setdefault(group, []).append(jnp.sum(frozen_weight.astype(jnp.float32) ** 2))
         return {group: jnp.stack(per_slot) for group, per_slot in norms.items()}
 
@@ -1973,9 +2017,7 @@ class GLUDecomposedModel(eqx.Module):
             slot_names = [name for name, g, _slot in vu.site_slots if g == group]
             Ws = jnp.stack(
                 [
-                    _frozen_site_weight(
-                        self.anatomy, jax.tree.map(lambda a, li=layer: a[li], self.stacked), kind
-                    )
+                    self._decomposed_site_weight(layer, kind)
                     for layer, kind in map(self.anatomy.family.parse, slot_names)
                 ]
             )
@@ -2089,6 +2131,8 @@ def build_engine_model(
     cfg: GLUArch,
     sites: tuple[SiteSpec, ...],
     anatomy: Anatomy,
+    *,
+    query_head: int | None = None,
 ) -> GLUDecomposedModel:
     """Assemble an engine model from the frozen full-model arrays + decomposition config
     for ANY declared anatomy. `sites` must be canonical-ordered with dims matching `cfg`."""
@@ -2100,6 +2144,9 @@ def build_engine_model(
         lambda kind: anatomy_nonlinearity_partition(anatomy, cfg, kind),
         cfg.n_layer,
     )
+    if query_head is not None:
+        assert anatomy is GLU_ANATOMY, "query-head slices are supported for GLU q sites only"
+        expected = glu_site_specs(cfg, site_cs, query_head=query_head)
     assert sites == expected, f"sites are not the canonical specs for this config: {sites}"
     return GLUDecomposedModel(
         embed=embed,
@@ -2113,6 +2160,7 @@ def build_engine_model(
         has_position_axis=True,
         eps=cfg.rms_norm_eps,
         n_ctx=cfg.n_ctx,
+        query_head=query_head,
     )
 
 
@@ -2124,9 +2172,21 @@ def build_decomposed_lm(
     inv_freq: Array,
     cfg: GLUArch,
     sites: tuple[SiteSpec, ...],
+    *,
+    query_head: int | None = None,
 ) -> GLUDecomposedModel:
     """`build_engine_model` at the GLU anatomy — the HF families' entry point."""
-    return build_engine_model(embed, layers, norm, lm_head, inv_freq, cfg, sites, GLU_ANATOMY)
+    return build_engine_model(
+        embed,
+        layers,
+        norm,
+        lm_head,
+        inv_freq,
+        cfg,
+        sites,
+        GLU_ANATOMY,
+        query_head=query_head,
+    )
 
 
 def load_decomposed_glu_from_hf(
@@ -2136,6 +2196,8 @@ def load_decomposed_glu_from_hf(
     load_attn: AttnLoader,
     inv_freq: Array,
     weights_dtype: DTypeLike,
+    *,
+    query_head: int | None = None,
 ) -> GLUDecomposedModel:
     """Load a GLU-transformer `DecomposedModel` from the cached HF snapshot: the full
     frozen model (embedding, all blocks, final norm, lm_head) as fields plus the static
@@ -2150,4 +2212,5 @@ def load_decomposed_glu_from_hf(
         inv_freq=inv_freq,
         cfg=cfg,
         sites=sites,
+        query_head=query_head,
     )

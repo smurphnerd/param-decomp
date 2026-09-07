@@ -71,12 +71,13 @@ def load_target(target: AnyLMTargetConfig, data_root: Path) -> GLUDecomposedMode
         case TargetConfig():
             variant = hf_model_variant(target.model_name)
             arch_cfg = variant.arch_config()
-            sites = glu_site_specs(arch_cfg, target.sites)
+            sites = glu_site_specs(arch_cfg, target.sites, query_head=target.query_head)
             loaded_model = variant.load(
                 target.model_name,
                 arch_cfg,
                 sites,
                 weights_jnp_dtype(target.weights_dtype),
+                query_head=target.query_head,
             )
     return _with_attention_implementation(loaded_model, target.attention_implementation)
 

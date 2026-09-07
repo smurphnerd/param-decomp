@@ -29,7 +29,10 @@ internal-only slices simply aren't in the set. No slice is ever special to the e
 
 A slice owns everything about its architecture: the frozen modules, the decomposed
 forward (including its sharding/remat strategy behind the protocol), its `ArchFamily`,
-and its weight loading. `tests/` holds the per-target parity/golden suites; engine
+and its weight loading. The shared GLU slice also supports a single-query-head target:
+its q site has one-head output width, the masked forward replaces only that head's slice,
+and every other query head stays on the frozen path. The LM composition exposes this as
+`decomposition.sites.kind: glu_transformer_q_head`. `tests/` holds the per-target parity/golden suites; engine
 behavior tests that merely use a target as a fixture stay with the engine.
 `invariance_check.py` is the SPEC D4 device-count invariance harness (a tiny GLU target
 driven through the engine at simulated device counts).

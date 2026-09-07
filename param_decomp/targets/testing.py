@@ -78,7 +78,11 @@ def tiny_glu_cfg() -> LlamaConfig:
 
 
 def tiny_glu_decomposed_lm(
-    cfg: LlamaConfig, sites: tuple[SiteSpec, ...], key: jax.Array
+    cfg: LlamaConfig,
+    sites: tuple[SiteSpec, ...],
+    key: jax.Array,
+    *,
+    query_head: int | None = None,
 ) -> GLUDecomposedModel:
     """A tiny random `GLUDecomposedModel` (random embedding + full frozen layer stack
     plus the decomposition `sites`) — the CPU-test analog of `load_decomposed_lm_from_hf`."""
@@ -110,6 +114,7 @@ def tiny_glu_decomposed_lm(
         inv_freq=llama3_inv_freq(cfg),
         cfg=cfg,
         sites=sites,
+        query_head=query_head,
     )
 
 

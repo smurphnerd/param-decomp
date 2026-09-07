@@ -181,6 +181,12 @@ are typed by that same vocabulary — so which layers get decomposed is a config
 (`layers: {kind: all | range | list}`), not a target property. A new target declares its
 family and gets any layer subset for free; layers without sites run the plain frozen block.
 
+One deliberately narrow exception is the `glu_transformer_q_head` c-spec: it selects one
+query head in one layer with one C. The target exposes the normal q-projection site name,
+but its `SiteSpec.d_out` is one `head_dim`; masked forwards replace only that head's output
+slice and leave all other query heads frozen. Use this arm when the experimental unit and
+component budget are explicitly per head. It cannot be mixed with other sites in one run.
+
 ## LM `target.spec`
 
 The LM target is a discriminated union on `kind`:

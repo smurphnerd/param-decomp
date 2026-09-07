@@ -44,6 +44,9 @@ class TargetConfig:
     weights_dtype: WeightsDtype
     """The authored `target.weights_dtype`, carried to the composition root's target load."""
     attention_implementation: AttentionImplementation
+    query_head: int | None = None
+    """When set, the sole q-projection site targets only this query-head slice; all
+    other heads remain frozen. `None` is the ordinary whole-matrix target."""
 
     supported_weights_dtypes: ClassVar[frozenset[WeightsDtype]] = frozenset({"bfloat16", "float32"})
     """Frozen-target weight dtypes the loader supports. `HFWeights` casts every tensor on

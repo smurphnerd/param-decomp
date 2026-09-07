@@ -199,6 +199,8 @@ def load_decomposed_qwen3_from_hf(
     cfg: GLUConfig,
     sites: tuple[SiteSpec, ...],
     weights_dtype: DTypeLike,
+    *,
+    query_head: int | None = None,
 ) -> GLUDecomposedModel:
     """The Qwen3 family HF load: QK-norm attention + plain RoPE frequencies."""
     return load_decomposed_glu_from_hf(
@@ -208,4 +210,5 @@ def load_decomposed_qwen3_from_hf(
         load_attn=lambda w, i: _load_attn(w, i, cfg),
         weights_dtype=weights_dtype,
         inv_freq=default_inv_freq(cfg.head_dim, cfg.rope_theta),
+        query_head=query_head,
     )

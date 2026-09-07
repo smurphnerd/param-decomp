@@ -128,6 +128,11 @@ def assert_finetune_structural_compat(
     assert parent_sites == new_sites, (
         f"fine-tune sites mismatch: parent {parent_sites} != new {new_sites}"
     )
+    parent_query_head = getattr(parent.target, "query_head", None)
+    new_query_head = getattr(built.target, "query_head", None)
+    assert parent_query_head == new_query_head, (
+        f"fine-tune query-head mismatch: parent {parent_query_head} != new {new_query_head}"
+    )
     assert parent.ci_fn == built.ci_fn, (
         f"fine-tune ci-fn arch mismatch: parent {parent.ci_fn} != new {built.ci_fn}"
     )

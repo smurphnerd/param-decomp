@@ -192,6 +192,21 @@ class GluTransformerCSpec(BaseConfig):
     cs: dict[GluMatrix, PositiveInt] = Field(..., min_length=1)
 
 
+class GluTransformerQHeadCSpec(BaseConfig):
+    """One query-head slice in one GLU-transformer layer.
+
+    This is a distinct target shape from the tiled whole-matrix grammar: the other query
+    heads stay frozen, while this site's rank-one subcomponents write only into the selected
+    head. It is intentionally singular — multiple heads belong in separate runs when the
+    scientific unit and component budget are per head.
+    """
+
+    kind: Literal["glu_transformer_q_head"] = "glu_transformer_q_head"
+    layer: NonNegativeInt
+    head: NonNegativeInt
+    C: PositiveInt
+
+
 class SimpleMlpCSpec(BaseConfig):
     """Per-matrix-type C tiled across the selected layers (plain-GELU family, LlamaSimpleMLP)."""
 
@@ -373,13 +388,14 @@ LMCiConfig = Annotated[
 
 
 class LMDecompositionConfig(BaseConfig):
-    """The LM decomposition apparatus: a tiled site-spec (per-matrix-type C over a layer
-    selection) + the CI-fn arch. Tiled-only ⇒ every block is structurally identical ⇒
-    chunkwise chunks are homogeneous by construction (no `explicit` variant here, so a
-    non-compiling heterogeneous decomposition is unrepresentable). The `sites.kind` family
-    (glu vs simple-MLP) is checked against the target family at resolve."""
+    """The LM decomposition apparatus: whole-matrix tiled sites or one GLU query-head
+    slice, plus the CI-fn arch. Every arm resolves to homogeneous block structure for the
+    chunkwise CI function; the sites kind is checked against the target family at resolve."""
 
-    sites: Annotated[GluTransformerCSpec | SimpleMlpCSpec, Discriminator("kind")]
+    sites: Annotated[
+        GluTransformerCSpec | GluTransformerQHeadCSpec | SimpleMlpCSpec,
+        Discriminator("kind"),
+    ]
     ci: LMCiConfig
 
 
@@ -537,12 +553,25 @@ def resolve_decomposition(
                     )
             hf_variant = hf_model_variant(spec.model_name)  # refuses unknown model names
             arch = hf_variant.arch_config()
-            tree = resolve_site_tree(sites, glu_transformer.FAMILY, arch.n_layer)
+            match sites:
+                case GluTransformerQHeadCSpec(layer=layer, head=head, C=C):
+                    assert layer < arch.n_layer, f"layer {layer} exceeds n_layer {arch.n_layer}"
+                    assert head < arch.n_head, f"query head {head} exceeds n_head {arch.n_head}"
+                    tree = SiteTree((BlockSites(layer, (("q", C),)),))
+                    query_head = head
+                case GluTransformerCSpec():
+                    tree = resolve_site_tree(sites, glu_transformer.FAMILY, arch.n_layer)
+                    query_head = None
+                case SimpleMlpCSpec():
+                    raise AssertionError(
+                        "c-spec family simple_mlp cannot target an HF GLU transformer"
+                    )
             target = TargetConfig(
                 model_name=spec.model_name,
                 sites=tree.site_cs(glu_transformer.FAMILY.name_of),
                 weights_dtype=target_config.weights_dtype,
                 attention_implementation=target_config.attention_implementation,
+                query_head=query_head,
             )
             grammar = _build_tap_grammar(
                 family=glu_transformer.FAMILY,
@@ -552,10 +581,15 @@ def resolve_decomposition(
                 d_mlp_hidden=glu_transformer.site_dims(arch, "down").d_in,
                 dims_of=lambda kind: glu_transformer.site_dims(arch, kind),
             )
-            site_specs = glu_transformer.glu_site_specs(arch, target.sites)
+            site_specs = glu_transformer.glu_site_specs(
+                arch, target.sites, query_head=target.query_head
+            )
             return _ResolvedDecomposition(target, tree, grammar, site_specs)
         case PretrainedTarget():
             assert spec.model_class.rsplit(".", 1)[-1] == "LlamaSimpleMLP", spec.model_class
+            assert isinstance(sites, SimpleMlpCSpec), (
+                "pretrained LlamaSimpleMLP requires simple_mlp sites"
+            )
             cache_dir = pretrain_cache.resolved_cache_dir(data_root, spec.run_path)
             arch = llama_simple_mlp.load_model_config(cache_dir)
             tree = resolve_site_tree(sites, llama_simple_mlp.FAMILY, arch.n_layer)
