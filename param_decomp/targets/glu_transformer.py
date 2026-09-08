@@ -1294,6 +1294,34 @@ class GLUDecomposedModel(eqx.Module):
     def site_output_keys(self, sites: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(site_output_tap_key(site) for site in sites)
 
+    def _narrow_query_head_site_capture(
+        self,
+        key: str,
+        value: Array,
+        placement: PlacementRules | None,
+    ) -> Array:
+        """Make a query-head site's public output capture match its one-head SiteSpec."""
+        if self.query_head is None or key != site_output_tap_key(self.site_names[0]):
+            return value
+        if placement is not None:
+            # Full Q is TP-sharded. A selected head is a global slice, so materialize
+            # feature-replicated capture layout before slicing it out.
+            value = constrain_activation(value, placement.activations.external)
+        width = self.stacked.attn.head_dim
+        start = self.query_head * width
+        return value[..., start : start + width]
+
+    def _narrow_query_head_site_captures(
+        self,
+        keys: tuple[str, ...],
+        values: tuple[Array, ...],
+        placement: PlacementRules | None,
+    ) -> tuple[Array, ...]:
+        return tuple(
+            self._narrow_query_head_site_capture(key, value, placement)
+            for key, value in zip(keys, values, strict=True)
+        )
+
     def assert_hidden_acts_reconstruction_points(self, keys: tuple[str, ...]) -> None:
         self._capture_grammar().assert_hidden_acts_reconstruction_points(
             keys,
@@ -1440,10 +1468,13 @@ class GLUDecomposedModel(eqx.Module):
         )
         _read_capture_buffers(captured_by_source, layout, buffers)
         residual = rms_norm(residual, self.norm, self.eps)
+        capture_values = _captures_in_request_order(capture_sources, captured_by_source)
         return ForwardResult.from_producer(
             output=self._output_logits(residual, placement),
             capture_keys=ordered_capture_keys,
-            capture_values=_captures_in_request_order(capture_sources, captured_by_source),
+            capture_values=self._narrow_query_head_site_captures(
+                ordered_capture_keys, capture_values, placement
+            ),
         )
 
     def _run_masked_forward(
@@ -1851,7 +1882,11 @@ class GLUDecomposedModel(eqx.Module):
         if layout is not None:
             _read_capture_buffers(captured_by_source, layout, buffers)
 
-        captures = _captures_in_request_order(capture_sources, captured_by_source)
+        captures = self._narrow_query_head_site_captures(
+            capture_keys,
+            _captures_in_request_order(capture_sources, captured_by_source),
+            placement,
+        )
         component_activations: dict[str, Array] = {}
         if collect_component_activations:
             assert component_activation_segments, (

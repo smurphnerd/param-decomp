@@ -4,12 +4,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax.sharding import AxisType, Mesh
 
 from param_decomp.core.components import (
     SiteC,
     component_stacks_from_site_arrays,
     init_component_stacks,
 )
+from param_decomp.core.init_placed import init_component_stacks_placed
 from param_decomp.core.model import MaterializedMasking
 from param_decomp.core.nonlinearity import AttentionHeads
 from param_decomp.core.placement import from_config
@@ -74,6 +76,7 @@ def test_query_head_mask_changes_only_selected_head():
         remat=False,
     )
     np.testing.assert_allclose(all_live.output, clean.output, rtol=1e-5, atol=1e-5)
+    assert clean.captures[key].shape == (2, 5, 8)
     np.testing.assert_allclose(all_live.captures[key], clean.captures[key], atol=1e-5)
 
     zeroed = model.masked_forward(
@@ -84,11 +87,8 @@ def test_query_head_mask_changes_only_selected_head():
         capture_keys=frozenset((key,)),
         remat=False,
     )
-    clean_q = np.asarray(clean.captures[key]).reshape(2, 5, 4, 8)
-    zeroed_q = np.asarray(zeroed.captures[key]).reshape(2, 5, 4, 8)
-    np.testing.assert_allclose(zeroed_q[:, :, HEAD], 0.0, atol=1e-6)
-    for head in (0, 2, 3):
-        np.testing.assert_allclose(zeroed_q[:, :, head], clean_q[:, :, head], atol=1e-6)
+    np.testing.assert_allclose(zeroed.captures[key], 0.0, atol=1e-6)
+    assert not np.allclose(zeroed.output, clean.output)
 
 
 def test_query_head_placed_masked_forward_traces():
@@ -99,19 +99,51 @@ def test_query_head_placed_masked_forward_traces():
     tokens = shard_batch(jnp.arange(10).reshape(2, 5), mesh, batch_axis=0)
     components = init_component_stacks(model.sites, jax.random.PRNGKey(4))
     masks = {SITE: jnp.ones((2, 5, C))}
+    key = site_output_tap_key(SITE)
     with jax.set_mesh(mesh):
-        output = jax.jit(
-            lambda m, c, x: (
-                m.masked_forward(
-                    m.prepare_compute_weights(c, rules),
-                    x,
-                    masking=MaterializedMasking(component_masks=masks),
-                    placement=rules,
-                    remat=False,
-                ).output
+        result = jax.jit(
+            lambda m, c, x: m.masked_forward(
+                m.prepare_compute_weights(c, rules),
+                x,
+                masking=MaterializedMasking(component_masks=masks),
+                placement=rules,
+                capture_keys=frozenset((key,)),
+                remat=False,
             )
         )(placed, components, tokens)
-    assert output.shape == (2, 5, 64)
+    assert result.output.shape == (2, 5, 64)
+    assert result.captures[key].shape == (2, 5, 8)
+
+
+@pytest.mark.multidevice
+def test_query_head_capture_materializes_across_tp():
+    if jax.device_count() < 2:
+        pytest.skip("requires two logical CPU devices")
+    model = _head_model()
+    mesh = Mesh(
+        np.asarray(jax.devices()[:2]).reshape(1, 1, 2),
+        ("replicate", "fsdp", "tp"),
+        axis_types=(AxisType.Explicit,) * 3,
+    )
+    rules = from_config("zero1", mesh, model.sites)
+    placed = place_target(model, rules).model
+    tokens = shard_batch(jnp.arange(10).reshape(2, 5), mesh, batch_axis=0)
+    masks = {SITE: jnp.ones((2, 5, C))}
+    key = site_output_tap_key(SITE)
+    with jax.set_mesh(mesh):
+        components = init_component_stacks_placed(model.sites, jax.random.PRNGKey(4), rules)
+        result = jax.jit(
+            lambda m, c, x: m.masked_forward(
+                m.prepare_compute_weights(c, rules),
+                x,
+                masking=MaterializedMasking(component_masks=masks),
+                placement=rules,
+                capture_keys=frozenset((key,)),
+                remat=False,
+            )
+        )(placed, components, tokens)
+    assert result.captures[key].shape == (2, 5, 8)
+    assert np.isfinite(np.asarray(result.captures[key])).all()
 
 
 def _decomposition(head: int) -> LMDecompositionConfig:
