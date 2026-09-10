@@ -257,7 +257,11 @@ def make_lm_evaluation(
             batches=pass_batches,
             shared_ci_reductions=cache(
                 lambda: accumulate_site_reductions(
-                    ci_reduction_step, model, invocation.placed_ci_fn, list(pass_batches)
+                    ci_reduction_step,
+                    model,
+                    invocation.state.decomposition.components,
+                    invocation.placed_ci_fn,
+                    list(pass_batches),
                 )
             ),
         )

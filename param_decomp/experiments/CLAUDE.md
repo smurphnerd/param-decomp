@@ -279,6 +279,33 @@ The path schemas (`topology/path_schemas.py`) cover the pretrain (`GPT2*`,
 `LlamaSimple*`) and HF GLU (`Llama`, `Qwen3`) architectures used to name harvested
 sites consistently.
 
+## Magnitude top-k selector (parameter-free CI fn)
+
+`ci: {type: magnitude_topk, k: K}` replaces the learned CI network with exact-k selection
+by `|x @ V|` per token per site, the top-k SAE's gate. It has no parameters (the
+`ci_fn_optimizer` seat is inert; `ImportanceMinimalityLoss` is still a required seat, set
+its `coeff: 0.0`). Its taps are `component_activations:<site>` keys, which the target does
+not capture; `model.forward_for_ci` fills them from `component_activation_forward`, and
+every CI consumer (train step, LM scalar evals, hidden-acts evals, slow-tier reductions)
+goes through it. The mask is emitted as the CI preactivations, so `lower = upper = mask`
+exactly (SPEC S5 holds). The mask is constant with respect to the loss's differentiated
+leaves; gradient reaches V only through the kept coefficients in the masked forward.
+
+The SAE-style head-reconstruction objective is then:
+
+```yaml
+loss_metrics:
+  - {type: FaithfulnessLoss, coeff: 1.0e3}
+  - {type: ImportanceMinimalityLoss, coeff: 0.0, pnorm: {max_val: 2.0, points: [...]}}
+  - type: CIMaskedReconLoss
+    coeff: 1.0
+    hidden_acts_reconstruction: {coeff: 10.0, points: [layers.14.self_attn.q_proj.out]}
+```
+
+Unsupported with this selector: attention-pattern evals, well-temperedness, the
+arithmetic grid, and clustering harvests (they capture CI taps directly and would fail
+at the target's capture grammar). Drop them from `eval.metrics`.
+
 ## Exact-k LM readout
 
 `HardTopKCEandKLLosses` is a slow, evaluation-only LM metric. For each token and each

@@ -18,6 +18,7 @@ from param_decomp.core.checkpoint import make_read_only_checkpoint_manager, rest
 from param_decomp.core.ci_fn import (
     ChunkwiseTransformerCIFn,
     GlobalMLPCIFn,
+    MagnitudeTopKCIFn,
     PlacedCIFn,
     resolve_ci_placement,
 )
@@ -142,7 +143,7 @@ def _consumer_decomposition_abstract(
     match shape_dtype.ci_fn:
         case ChunkwiseTransformerCIFn():
             ci_fn_shardings = shape_dtype.ci_fn.shardings(mesh, rules.ci_fn)
-        case GlobalMLPCIFn():
+        case GlobalMLPCIFn() | MagnitudeTopKCIFn():
             ci_fn_shardings = shape_dtype.ci_fn.shardings(mesh)
         case _:
             raise AssertionError(f"unknown LM CI fn {type(shape_dtype.ci_fn)}")

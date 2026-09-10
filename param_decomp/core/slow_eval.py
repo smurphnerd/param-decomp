@@ -68,6 +68,7 @@ from param_decomp.core.ci_fn import (
     lower_leaky_hard_sigmoid,
     upper_leaky_hard_sigmoid,
 )
+from param_decomp.core.components import ComponentStacks
 from param_decomp.core.configs import (
     DenseCITargetSpec,
     IdentityCIErrorConfig,
@@ -76,7 +77,12 @@ from param_decomp.core.configs import (
     UVPlotsConfig,
 )
 from param_decomp.core.jit_util import filter_jit
-from param_decomp.core.model import CaptureKeys, PlacedModel
+from param_decomp.core.model import (
+    CaptureKeys,
+    PlacedModel,
+    forward_for_ci,
+    prepare_compute_weights,
+)
 
 IDENTITY_CI_ERROR_TOLERANCE = 0.1
 """Torch `IdentityCIPattern.distance_from` / `compute_target_metrics` default tolerance —
@@ -132,7 +138,7 @@ BinnedValues = tuple[Array, Array, Array]
 
 
 SlowEvalStep = Callable[
-    [PlacedModel, Any, Float[Array, "*leading d"]],
+    [PlacedModel, ComponentStacks, Any, Float[Array, "*leading d"]],
     tuple[
         dict[str, Array],
         dict[str, Array],
@@ -142,12 +148,13 @@ SlowEvalStep = Callable[
         dict[str, Array],
     ],
 ]
-"""`(model, placed_ci_fn, residual) -> (density_counts, ci_sums, n_positions, binned_lower,
-binned_preactivations, density_hist)` — the per-batch reduction, pre-reduced over positions.
-`density_hist` maps site -> `(C, n_bins + 1)` counts (empty when the density heatmap is off);
-the two binned dicts are empty when the caller asked for no value histogram.
-The slow plot metrics read only the CI arrays, so V/U (`components`) is not an input. `model`
-(frozen-weight-bearing) is the jit ARG."""
+"""`(model, components, placed_ci_fn, residual) -> (density_counts, ci_sums, n_positions,
+binned_lower, binned_preactivations, density_hist)` — the per-batch reduction, pre-reduced
+over positions. `density_hist` maps site -> `(C, n_bins + 1)` counts (empty when the density
+heatmap is off); the two binned dicts are empty when the caller asked for no value histogram.
+The slow plot metrics read only the CI arrays; `components` is consumed only to prepare
+component-activation CI taps (`forward_for_ci`). `model` (frozen-weight-bearing) is the jit
+ARG."""
 
 
 CI_DENSITY_HEATMAP_FLOOR = 1e-9
@@ -227,7 +234,10 @@ def make_slow_eval_step(
     site_names = model_static.site_names
 
     def slow_eval_step(
-        model: PlacedModel, placed_ci_fn: PlacedCIFn, residual: Float[Array, "*leading d"]
+        model: PlacedModel,
+        components: ComponentStacks,
+        placed_ci_fn: PlacedCIFn,
+        residual: Float[Array, "*leading d"],
     ) -> tuple[
         dict[str, Array],
         dict[str, Array],
@@ -238,11 +248,10 @@ def make_slow_eval_step(
     ]:
         # Read the CI fn in training precision (bf16), like train.py / eval.py: the readout
         # reflects the deployed model, and cuDNN flash attention rejects fp32.
-        preactivations = ci_preactivations(
-            placed_ci_fn,
-            model.clean_forward(residual, ci_capture_keys).captures,
-            remat=False,
+        _, taps = forward_for_ci(
+            model, prepare_compute_weights(model, components), residual, ci_capture_keys
         )
+        preactivations = ci_preactivations(placed_ci_fn, taps, remat=False)
         lower = {s: lower_leaky_hard_sigmoid(preactivations[s]) for s in site_names}
 
         density_counts = {
@@ -285,6 +294,7 @@ def make_slow_eval_step(
 def accumulate_site_reductions(
     slow_eval_step: SlowEvalStep,
     model: PlacedModel,
+    components: ComponentStacks,
     placed_ci_fn: PlacedCIFn,
     residual_batches: list[Float[Array, "*leading d"]],
 ) -> dict[str, SiteReduction]:
@@ -300,7 +310,7 @@ def accumulate_site_reductions(
     total_positions = 0
     for batch_idx, residual in enumerate(residual_batches):
         d, s, n_pos, binned_lower, binned_preactivations, density_hist = slow_eval_step(
-            model, placed_ci_fn, residual
+            model, components, placed_ci_fn, residual
         )
         assert not (binned_lower and len(residual_batches) > 1), (
             "the CIHistograms value histograms bin against each batch's own min/max, so "
@@ -334,10 +344,10 @@ def accumulate_site_reductions(
 
 
 PositionCIStep = Callable[
-    [PlacedModel, Any, Float[Array, "*leading d"]],
+    [PlacedModel, ComponentStacks, Any, Float[Array, "*leading d"]],
     tuple[dict[str, Array], dict[str, Array], Array],
 ]
-"""`(model, placed_ci_fn, residual) -> ({site: lower (T, C)}, {site: upper (T, C)}, n_batch)` —
+"""`(model, components, placed_ci_fn, residual) -> ({site: lower (T, C)}, {site: upper (T, C)}, n_batch)` —
 the per-batch CI summed over the batch leading axis, position axis kept. Pairs with
 `accumulate_position_ci` to form a batch-mean `(T, C)` CI matrix per site. `model`
 (frozen-weight-bearing) is the jit ARG."""
@@ -354,14 +364,16 @@ def make_position_ci_step(
     site_names = model_static.site_names
 
     def position_ci_step(
-        model: PlacedModel, placed_ci_fn: PlacedCIFn, residual: Float[Array, "*leading d"]
+        model: PlacedModel,
+        components: ComponentStacks,
+        placed_ci_fn: PlacedCIFn,
+        residual: Float[Array, "*leading d"],
     ) -> tuple[dict[str, Array], dict[str, Array], Array]:
         # Training precision (bf16) readout — see make_slow_eval_step; preactivations upcast to fp32.
-        preactivations = ci_preactivations(
-            placed_ci_fn,
-            model.clean_forward(residual, ci_capture_keys).captures,
-            remat=False,
+        _, taps = forward_for_ci(
+            model, prepare_compute_weights(model, components), residual, ci_capture_keys
         )
+        preactivations = ci_preactivations(placed_ci_fn, taps, remat=False)
         lower = {s: lower_leaky_hard_sigmoid(preactivations[s]) for s in site_names}
         upper = {s: upper_leaky_hard_sigmoid(preactivations[s]) for s in site_names}
         first = lower[site_names[0]]
@@ -385,6 +397,7 @@ class PositionCI:
 def accumulate_position_ci(
     position_ci_step: PositionCIStep,
     model: PlacedModel,
+    components: ComponentStacks,
     placed_ci_fn: PlacedCIFn,
     residual_batches: list[Float[Array, "*leading d"]],
 ) -> dict[str, PositionCI]:
@@ -396,7 +409,7 @@ def accumulate_position_ci(
     upper: dict[str, np.ndarray] = {}
     total_batch = 0
     for batch_idx, residual in enumerate(residual_batches):
-        lo, hi, n_batch = position_ci_step(model, placed_ci_fn, residual)
+        lo, hi, n_batch = position_ci_step(model, components, placed_ci_fn, residual)
         total_batch += int(n_batch)
         for site in lo:
             lo_np, hi_np = np.asarray(lo[site]), np.asarray(hi[site])

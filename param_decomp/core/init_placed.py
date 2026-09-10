@@ -37,6 +37,7 @@ from param_decomp.core.ci_fn import (
     CIFnArch,
     GlobalMLPCIFn,
     LayerwiseMLPCIFn,
+    MagnitudeTopKCIFn,
     build_ci_fn,
 )
 from param_decomp.core.components import (
@@ -69,7 +70,7 @@ def ci_fn_shardings(abstract: CIFn, mesh: Mesh, rules: PlacementRules) -> CIFn:
     match abstract:
         case ChunkwiseTransformerCIFn():
             return abstract.shardings(mesh, rules.ci_fn)
-        case LayerwiseMLPCIFn() | GlobalMLPCIFn():
+        case LayerwiseMLPCIFn() | GlobalMLPCIFn() | MagnitudeTopKCIFn():
             return abstract.shardings(mesh)
         case _:
             raise AssertionError(f"unknown CI fn {type(abstract)}")

@@ -205,7 +205,11 @@ def make_site_figures_operation(
 
         def reductions_of(context: LMEvalContext) -> dict[str, SiteReduction]:
             return accumulate_site_reductions(
-                step, model, context.placed_ci_fn, list(context.batches)
+                step,
+                model,
+                context.state.decomposition.components,
+                context.placed_ci_fn,
+                list(context.batches),
             )
 
         return reductions_of
@@ -259,6 +263,7 @@ def make_permutation_operation(
         position_ci = accumulate_position_ci(
             position_step,
             model,
+            context.state.decomposition.components,
             context.placed_ci_fn,
             list(context.batches),
         )

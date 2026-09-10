@@ -150,6 +150,32 @@ def select_captures(captures: dict[str, Array], capture_keys: CaptureKeys) -> di
     return {key: captures[key] for key in sorted(capture_keys)}
 
 
+COMPONENT_ACTIVATION_TAP_PREFIX = "component_activations:"
+"""CI-fn tap keys of this form are not captures of the clean forward. `forward_for_ci`
+fills them with the named site's component activations `x @ V`, so a CI fn can select on
+the coefficients it gates (the magnitude top-k selector). Every other key is a capture the
+target resolves."""
+
+
+def component_activation_tap_key(site: str) -> str:
+    return f"{COMPONENT_ACTIVATION_TAP_PREFIX}{site}"
+
+
+def is_component_activation_tap(key: str) -> bool:
+    return key.startswith(COMPONENT_ACTIVATION_TAP_PREFIX)
+
+
+def component_activation_tap_site(key: str) -> str:
+    assert is_component_activation_tap(key), key
+    return key.removeprefix(COMPONENT_ACTIVATION_TAP_PREFIX)
+
+
+def split_ci_capture_keys(ci_capture_keys: CaptureKeys) -> tuple[CaptureKeys, CaptureKeys]:
+    """(keys the target captures, component-activation tap keys)."""
+    component = frozenset(k for k in ci_capture_keys if is_component_activation_tap(k))
+    return ci_capture_keys - component, component
+
+
 PreparedT = TypeVar("PreparedT", default=Any)
 
 
@@ -399,6 +425,36 @@ def prepare_compute_weights[PreparedT](
     return placed.model.prepare_compute_weights(
         cast_floating(components, COMPUTE_DT), placed.placement
     )
+
+
+def forward_for_ci[PreparedT](
+    placed: PlacedModel[PreparedT],
+    prepared_weights: PreparedT,
+    inputs: Any,
+    ci_capture_keys: CaptureKeys,
+    extra_capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
+) -> tuple[ForwardResult, dict[str, Array]]:
+    """One frozen forward that yields the CI fn's taps plus any extra captures.
+
+    With ordinary taps this is `clean_forward` + `select_captures`. When the CI fn asks
+    for component-activation taps, the forward is `component_activation_forward` (same
+    single pass over the target, plus one `x @ V` per site) and those taps are filled from
+    its per-site activations. The returned `ForwardResult` carries exactly
+    `(captured ci keys) | extra_capture_keys`."""
+    captured_keys, component_keys = split_ci_capture_keys(ci_capture_keys)
+    if not component_keys:
+        result = placed.clean_forward(inputs, captured_keys | extra_capture_keys)
+        return result, select_captures(result.captures, captured_keys)
+    sites = frozenset(component_activation_tap_site(key) for key in component_keys)
+    unknown = sites - frozenset(placed.site_names)
+    assert not unknown, f"component-activation taps name non-sites {sorted(unknown)}"
+    result, component_activations = placed.component_activation_forward(
+        prepared_weights, inputs, capture_keys=captured_keys | extra_capture_keys
+    )
+    taps = select_captures(result.captures, captured_keys)
+    for key in sorted(component_keys):
+        taps[key] = component_activations[component_activation_tap_site(key)]
+    return result, taps
 
 
 def faithfulness_weight_deltas(

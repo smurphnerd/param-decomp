@@ -66,8 +66,8 @@ from param_decomp.core.model import (
     CaptureKeys,
     MaterializedMasking,
     PlacedModel,
+    forward_for_ci,
     prepare_compute_weights,
-    select_captures,
 )
 from param_decomp.core.precision import COMPUTE_DT
 from param_decomp.core.recon import ForwardObservations, reconstruction_observations
@@ -145,9 +145,10 @@ def _prepare_lm_batch[PreparedT](
 ) -> _PreparedLMBatch[PreparedT]:
     """Pure shared preparation required by independent LM metric kernels."""
     tokens = batch_shard_leading(token_ids, mesh)
-    capture_keys = ci_capture_keys | activation_capture_keys
-    clean_forward_result = model.clean_forward(tokens, capture_keys)
-    ci_input_activations = select_captures(clean_forward_result.captures, ci_capture_keys)
+    prepared_weights = prepare_compute_weights(model, components)
+    clean_forward_result, ci_input_activations = forward_for_ci(
+        model, prepared_weights, tokens, ci_capture_keys, activation_capture_keys
+    )
     clean = reconstruction_observations(
         clean_forward_result,
         hidden_acts_capture_keys=activation_capture_keys,
@@ -162,7 +163,6 @@ def _prepare_lm_batch[PreparedT](
     if n_valid_rows is not None:
         assert n_valid_rows <= tokens.shape[0], (n_valid_rows, tokens.shape)
         valid_row_mask = (jnp.arange(tokens.shape[0]) < n_valid_rows).astype(jnp.float32)
-    prepared_weights = prepare_compute_weights(model, components)
     return _PreparedLMBatch(
         tokens=tokens,
         clean=clean,

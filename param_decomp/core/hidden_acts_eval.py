@@ -39,6 +39,7 @@ from param_decomp.core.model import (
     CaptureKeys,
     MaterializedMasking,
     PlacedModel,
+    forward_for_ci,
     prepare_compute_weights,
 )
 from param_decomp.core.precision import COMPUTE_DT
@@ -90,7 +91,6 @@ def make_ci_hidden_acts_step(
     """Deterministic CI-mask hidden-acts step: `lower_leaky` CI, no delta, one forward."""
     site_names = model_static.site_names
     site_output_keys = model_static.site_output_keys(site_names)
-    clean_capture_keys = ci_capture_keys | frozenset(site_output_keys)
 
     output_key_by_site = dict(zip(site_names, site_output_keys, strict=True))
 
@@ -101,12 +101,13 @@ def make_ci_hidden_acts_step(
         inputs: Any,
         _key: PRNGKeyArray,
     ) -> tuple[dict[str, Array], dict[str, int]]:
-        clean_captures_by_key = model.clean_forward(inputs, clean_capture_keys).captures
-        clean_ci_inputs_by_key = {key: clean_captures_by_key[key] for key in ci_capture_keys}
-        clean_site_outputs_by_site = {
-            site: clean_captures_by_key[key] for site, key in output_key_by_site.items()
-        }
         prepared_weights = prepare_compute_weights(model, components)
+        clean_forward_result, clean_ci_inputs_by_key = forward_for_ci(
+            model, prepared_weights, inputs, ci_capture_keys, frozenset(site_output_keys)
+        )
+        clean_site_outputs_by_site = {
+            site: clean_forward_result.captures[key] for site, key in output_key_by_site.items()
+        }
         ci_lower = evaluate_compute_ci(
             materialize_ci_compute_weights(placed_ci_fn), clean_ci_inputs_by_key, remat=False
         ).lower
@@ -142,7 +143,6 @@ def make_stochastic_hidden_acts_step(
     assert n_mask_samples >= 1, n_mask_samples
     site_names = model_static.site_names
     site_output_keys = model_static.site_output_keys(site_names)
-    clean_capture_keys = ci_capture_keys | frozenset(site_output_keys)
 
     output_key_by_site = dict(zip(site_names, site_output_keys, strict=True))
 
@@ -153,12 +153,13 @@ def make_stochastic_hidden_acts_step(
         inputs: Any,
         key: PRNGKeyArray,
     ) -> tuple[dict[str, Array], dict[str, int]]:
-        clean_captures_by_key = model.clean_forward(inputs, clean_capture_keys).captures
-        clean_ci_inputs_by_key = {key: clean_captures_by_key[key] for key in ci_capture_keys}
-        clean_site_outputs_by_site = {
-            site: clean_captures_by_key[key] for site, key in output_key_by_site.items()
-        }
         prepared_weights = prepare_compute_weights(model, components)
+        clean_forward_result, clean_ci_inputs_by_key = forward_for_ci(
+            model, prepared_weights, inputs, ci_capture_keys, frozenset(site_output_keys)
+        )
+        clean_site_outputs_by_site = {
+            site: clean_forward_result.captures[key] for site, key in output_key_by_site.items()
+        }
         ci_lower = evaluate_compute_ci(
             materialize_ci_compute_weights(placed_ci_fn), clean_ci_inputs_by_key, remat=False
         ).lower

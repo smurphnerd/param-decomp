@@ -35,6 +35,7 @@ from param_decomp.core.ci_fn import (
     ChunkwiseTransformerCIArch,
     GlobalMLPCIArch,
     GQACIAttention,
+    MagnitudeTopKCIArch,
     MHACIAttention,
     TapSpec,
     resolve_ci_placement,
@@ -380,11 +381,24 @@ class GlobalMlpCiConfig(BaseConfig):
     input_tap: ChunkInputTap
 
 
+class MagnitudeTopKCiConfig(BaseConfig):
+    """Parameter-free exact-k selector: per token per site, keep the `k` components with
+    the largest `|x @ V|` (the top-k SAE's gate). No CI network is trained; the
+    `ci_fn_optimizer` seat is inert. Pair with `CIMaskedReconLoss` carrying a
+    `hidden_acts_reconstruction` point on the decomposed site's output for the SAE-style
+    head-reconstruction objective. `k` must not exceed any site's C."""
+
+    type: Literal["magnitude_topk"] = "magnitude_topk"
+    k: PositiveInt
+
+
 LMCiConfig = Annotated[
-    ChunkwiseTransformerCiConfig | GlobalMlpCiConfig, Field(discriminator="type")
+    ChunkwiseTransformerCiConfig | GlobalMlpCiConfig | MagnitudeTopKCiConfig,
+    Field(discriminator="type"),
 ]
-"""The CI-fn arches an LM run can author, both positioned: the chunkwise transformer
-(cross-position CI within a chunk) and the global MLP (pointwise per token)."""
+"""The CI-fn arches an LM run can author, all positioned: the chunkwise transformer
+(cross-position CI within a chunk), the global MLP (pointwise per token), and the
+parameter-free magnitude top-k selector."""
 
 
 class LMDecompositionConfig(BaseConfig):
@@ -705,14 +719,27 @@ def _resolve_global_mlp_ci_arch(
     )
 
 
-LMCIFnArch = ChunkwiseTransformerCIArch | GlobalMLPCIArch
+def _resolve_magnitude_topk_ci_arch(
+    tree: SiteTree, ci: MagnitudeTopKCiConfig, grammar: TransformerTapGrammar
+) -> MagnitudeTopKCIArch:
+    """The selector reads each site's own component activations, so its taps are the
+    sites themselves (`component_activation_tap_key`), not residual captures."""
+    site_cs = tree.site_cs(grammar.family.name_of)
+    for site in site_cs:
+        assert ci.k <= site.C, f"magnitude_topk k={ci.k} exceeds C={site.C} at {site.name}"
+    return MagnitudeTopKCIArch(
+        k=ci.k, has_position_axis=True, output_sites=tuple(site.name for site in site_cs)
+    )
+
+
+LMCIFnArch = ChunkwiseTransformerCIArch | GlobalMLPCIArch | MagnitudeTopKCIArch
 """What `LMCiConfig` resolves to — the arches an LM run (and its stored-run consumers)
 can carry."""
 
 
 def resolve_lm_ci_arch(
     tree: SiteTree,
-    ci: ChunkwiseTransformerCiConfig | GlobalMlpCiConfig,
+    ci: ChunkwiseTransformerCiConfig | GlobalMlpCiConfig | MagnitudeTopKCiConfig,
     grammar: TransformerTapGrammar,
 ) -> LMCIFnArch:
     """The one authored-CI → resolved-arch seam: every LM build route (train, targeted,
@@ -723,6 +750,8 @@ def resolve_lm_ci_arch(
             return _resolve_chunkwise_ci_arch(tree, ci, grammar)
         case GlobalMlpCiConfig():
             return _resolve_global_mlp_ci_arch(tree, ci, grammar)
+        case MagnitudeTopKCiConfig():
+            return _resolve_magnitude_topk_ci_arch(tree, ci, grammar)
 
 
 def _assert_losses_supported(cfg: LMExperimentConfig, site_names: tuple[str, ...]) -> None:
@@ -773,7 +802,7 @@ def _assert_placement_claims(
     match ci_fn:
         case ChunkwiseTransformerCIArch():
             pass
-        case GlobalMLPCIArch():
+        case GlobalMLPCIArch() | MagnitudeTopKCIArch():
             assert not isinstance(runtime.sharding, PlacementTableConfig), (
                 "runtime.sharding is an explicit table, whose authored ci_fn rows only the "
                 "chunkwise transformer consumes — the MLP CI fns run unplaced "

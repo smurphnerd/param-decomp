@@ -42,7 +42,7 @@ from jaxtyping import Array, Float, PRNGKeyArray
 from param_decomp.core.axes import Axes, MeshAxis, SemanticAxis
 from param_decomp.core.components import SiteSpec, activation_axes
 from param_decomp.core.linear_plan import placed_linear, value_mesh
-from param_decomp.core.model import CaptureKeys
+from param_decomp.core.model import CaptureKeys, component_activation_tap_key
 from param_decomp.core.placement import (
     CIFnPlacement,
     CIWeightFamily,
@@ -1130,10 +1130,98 @@ def init_global_mlp_ci_fn(
     )
 
 
+# ----------------------------- magnitude top-k (parameter-free) -----------------------------
+
+
+@dataclass(frozen=True)
+class MagnitudeTopKCIArch:
+    """Exact-k selection by `|x @ V|` per token per site: the top-k SAE's selector, with
+    no learned parameters. Its taps are the component-activation keys
+    (`model.component_activation_tap_key`), filled by `model.forward_for_ci` rather than
+    captured. `k` must not exceed any site's C (asserted at construction)."""
+
+    k: int
+    has_position_axis: bool
+    output_sites: tuple[str, ...]
+    """The sites selected over (= the model's sites). Carried on the arch so
+    `capture_keys` is derivable before the fn exists, like the other LM arches."""
+
+    @property
+    def capture_keys(self) -> CaptureKeys:
+        return frozenset(component_activation_tap_key(site) for site in self.output_sites)
+
+
+def exact_top_k_mask(values: Array, k: int) -> Array:
+    """Binary mask keeping exactly k entries on the last axis, ties broken by index.
+
+    A C-sharded input (TP) is gathered C-replicated for the sort; the caller reshards the
+    result back to its activation layout (`ForwardSubstrate.shard_ci` /
+    `constrain_component_activation`)."""
+    sharding = jax.typeof(values).sharding
+    if not value_mesh(values).empty and sharding.spec and sharding.spec[-1] is not None:
+        values = jax.sharding.reshard(values, P(*sharding.spec[:-1], None))
+    order = jnp.argsort(values, axis=-1, stable=True)
+    ranks = jnp.argsort(order, axis=-1, stable=True)
+    return (ranks >= values.shape[-1] - k).astype(values.dtype)
+
+
+class MagnitudeTopKCIFn(eqx.Module):
+    """Parameter-free CI fn: `preactivations = lower = upper = 1[|z| in top-k]` per site,
+    `z` the site's component activations read from its component-activation tap. The mask
+    is emitted AS the preactivations so S5 holds exactly (both squashings of a 0/1 value
+    are that value) and every consumer that re-squashes preactivations agrees. The mask is
+    constant with respect to the loss's differentiated leaves (the taps are prepared
+    outside the loss), so gradient reaches V only through the KEPT coefficients in the
+    masked forward: the TopK-SAE gradient."""
+
+    k: int = eqx.field(static=True)
+    output_names: tuple[str, ...] = eqx.field(static=True)
+    has_position_axis: bool = eqx.field(static=True)
+
+    @property
+    def capture_keys(self) -> CaptureKeys:
+        return frozenset(component_activation_tap_key(site) for site in self.output_names)
+
+    def shardings(self, mesh: Mesh) -> "MagnitudeTopKCIFn":
+        del mesh
+        return self
+
+    def __call__(
+        self, taps: dict[str, Array], *, remat: bool, placement: CIFnPlacement | None
+    ) -> CI:
+        del remat
+        assert placement is None, f"{type(self).__name__} is unplaced (no CI placement rows)"
+        masks: SiteDict = {}
+        for site in self.output_names:
+            z = taps[component_activation_tap_key(site)]
+            assert z.shape[-1] >= self.k, (site, z.shape, self.k)
+            masks[site] = exact_top_k_mask(jnp.abs(z), self.k)
+        return CI.from_preactivations(masks)
+
+
+def init_magnitude_top_k_ci_fn(
+    arch: MagnitudeTopKCIArch, sites: tuple[SiteSpec, ...]
+) -> MagnitudeTopKCIFn:
+    assert sites, "a CI fn needs at least one output site"
+    assert tuple(s.name for s in sites) == arch.output_sites, (
+        tuple(s.name for s in sites),
+        arch.output_sites,
+    )
+    for site in sites:
+        assert 0 < arch.k <= site.C, (
+            f"magnitude top-k k={arch.k} must be in 1..C={site.C} ({site.name})"
+        )
+    return MagnitudeTopKCIFn(
+        k=arch.k,
+        output_names=tuple(s.name for s in sites),
+        has_position_axis=arch.has_position_axis,
+    )
+
+
 # ----------------------------- construction (placement-agnostic) -----------------------------
 
 
-CIFnArch = ChunkwiseTransformerCIArch | LayerwiseMLPCIArch | GlobalMLPCIArch
+CIFnArch = ChunkwiseTransformerCIArch | LayerwiseMLPCIArch | GlobalMLPCIArch | MagnitudeTopKCIArch
 """Every CI-fn architecture. Construction goes through `build_ci_fn`; sharding/placement is
 a separate, scale-driven concern (see `init_placed`), never coupled to arch type."""
 
@@ -1157,7 +1245,7 @@ def resolve_ci_placement(arch: CIFnArch, rules: PlacementRules | None) -> CIFnPl
             activations.validate_shape(("q_head",), (arch.attention.n_heads,))
             activations.validate_shape(("kv_head",), (arch.attention.n_kv_heads,))
             return rules.ci_fn
-        case LayerwiseMLPCIArch() | GlobalMLPCIArch():
+        case LayerwiseMLPCIArch() | GlobalMLPCIArch() | MagnitudeTopKCIArch():
             return None
 
 
@@ -1171,3 +1259,6 @@ def build_ci_fn(arch: CIFnArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray) 
             return init_layerwise_mlp_ci_fn(arch, sites, key)
         case GlobalMLPCIArch():
             return init_global_mlp_ci_fn(arch, sites, key)
+        case MagnitudeTopKCIArch():
+            del key  # parameter-free
+            return init_magnitude_top_k_ci_fn(arch, sites)

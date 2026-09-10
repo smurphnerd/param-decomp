@@ -84,8 +84,8 @@ from param_decomp.core.model import (
     PlacedModel,
     StochasticMasking,
     faithfulness_weight_deltas,
+    forward_for_ci,
     prepare_compute_weights,
-    select_captures,
 )
 from param_decomp.core.objective import (
     ImportanceMinimalityTerm,
@@ -535,18 +535,30 @@ class ForwardSubstrate[PreparedT]:
         )
 
     def prep_stream(
-        self, model: PlacedModel[PreparedT], batch: Any, hidden_acts_keys: CaptureKeys
+        self,
+        model: PlacedModel[PreparedT],
+        batch: Any,
+        hidden_acts_keys: CaptureKeys,
+        prepared_weights: PreparedT,
     ) -> StreamInputs:
         """Shard one stream's batch, run its detached clean forward, and pull the CI taps +
         recon observations. `hidden_acts_keys` is the stream's own union — a stream whose
-        grid carries no hidden-acts reconstruction captures none."""
+        grid carries no hidden-acts reconstruction captures none. `prepared_weights` feeds
+        component-activation taps (`model.forward_for_ci`); the ordinary tap path ignores
+        it. The whole result is detached: the CI taps are inputs to the CI fn, never a
+        gradient path back to V."""
         batch = self.shard_batch_tree(batch)
         with jax.named_scope("pd_clean_fwd_and_taps"):
-            clean_forward_result = jax.tree.map(
+            clean_forward_result, taps = jax.tree.map(
                 jax.lax.stop_gradient,
-                model.clean_forward(batch, self.ci_capture_keys | hidden_acts_keys),
+                forward_for_ci(
+                    model,
+                    jax.lax.stop_gradient(prepared_weights),
+                    batch,
+                    self.ci_capture_keys,
+                    hidden_acts_keys,
+                ),
             )
-            taps = select_captures(clean_forward_result.captures, self.ci_capture_keys)
             clean = reconstruction_observations(
                 clean_forward_result,
                 hidden_acts_capture_keys=hidden_acts_keys,
@@ -1050,12 +1062,11 @@ def make_train_step[PreparedT](
         }
         reconstruction_specs = grid.reconstruction_specs_at(train_frac)
 
-        stream = substrate.prep_stream(model, batch, grid.capture_keys)
-
         # ── adversary ascents: params + CI detached (SPEC §4.5) ──
         prepared_weights, recon_vjp = substrate.component_weights_vjp(
             model, decomposition.components
         )
+        stream = substrate.prep_stream(model, batch, grid.capture_keys, prepared_weights)
         detached_prepared_weights = jax.lax.stop_gradient(prepared_weights)
         # The CI envelope is a pure fn of the batch, so compute it ONCE per step — the value +
         # its vjp, mirroring `prepared_weights`/`recon_vjp`. The ascend uses the stop_gradient'd
@@ -1409,12 +1420,13 @@ def make_targeted_train_step[PreparedT](
         reconstruction_specs = target.reconstruction_specs_at(train_frac)
         nt_reconstruction_specs = nontarget.reconstruction_specs_at(train_frac)
 
-        stream = substrate.prep_stream(model, batch, target.capture_keys)
-        nt_stream = substrate.prep_stream(model, nontarget_batch, nontarget.capture_keys)
-
         # ── adversary ascents: TARGET pass only, params + CI detached (SPEC §4.5/§11) ──
         prepared_weights, recon_vjp = substrate.component_weights_vjp(
             model, decomposition.components
+        )
+        stream = substrate.prep_stream(model, batch, target.capture_keys, prepared_weights)
+        nt_stream = substrate.prep_stream(
+            model, nontarget_batch, nontarget.capture_keys, prepared_weights
         )
         detached_prepared_weights = jax.lax.stop_gradient(prepared_weights)
         compute_ci_fn, ci_weights_vjp = substrate.ci_weights_vjp(decomposition.ci_fn)

@@ -131,13 +131,13 @@ def test_every_placed_eval_tier_traces_and_returns_finite_values():
 
         density, ci_sums, n_positions, binned_lower, binned_pre, density_hist = make_slow_eval_step(
             model, ci_fn.fn.capture_keys, 0.1, 8, 16
-        )(model, ci_fn, tokens)
+        )(model, vu, ci_fn, tokens)
         assert int(n_positions) == tokens.shape[0] * tokens.shape[1]
         for tree in (density, ci_sums, binned_lower, binned_pre, density_hist):
             assert all(np.isfinite(np.asarray(v)).all() for v in jax.tree.leaves(tree))
 
         lower_sum, upper_sum, n_batch = make_position_ci_step(model, ci_fn.fn.capture_keys)(
-            model, ci_fn, tokens
+            model, vu, ci_fn, tokens
         )
         assert int(n_batch) == tokens.shape[0]
         for tree in (lower_sum, upper_sum):
@@ -229,7 +229,10 @@ def test_eval_steps_keep_the_batch_axis_sharded_in_compiled_hlo():
                 make_hard_top_k_ce_kl_step(model, keys, (1, 4), mesh),
                 (model, vu, ci_fn, tokens, key),
             ),
-            "slow_eval": (make_slow_eval_step(model, keys, 0.1, 8, 16), (model, ci_fn, tokens)),
+            "slow_eval": (
+                make_slow_eval_step(model, keys, 0.1, 8, 16),
+                (model, vu, ci_fn, tokens),
+            ),
             "stochastic_attn": (
                 make_stochastic_attn_patterns_step(model, keys, 2),
                 (model, vu, ci_fn, tokens, key),
