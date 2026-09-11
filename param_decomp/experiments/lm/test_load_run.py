@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from param_decomp.core import placement
+from param_decomp.core.ci_fn import MagnitudeTopKCIArch, build_ci_fn
 from param_decomp.core.components import SiteC, init_component_stacks
 from param_decomp.core.model import PlacedModel
 from param_decomp.core.train import Decomposition
@@ -170,3 +171,37 @@ def test_open_jax_run_restores_generic_ci_consumer(
         for leaf in jax.tree.leaves((run.prepared_weights, run.ci_fn))
         if eqx.is_inexact_array(leaf)
     )
+
+
+def test_open_jax_run_restores_parameter_free_magnitude_topk_ci(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tiny_glu_cfg()
+    sites = glu_site_specs(cfg, (SiteC(site_name(2, "q"), 4),))
+    model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
+    ci_fn = build_ci_fn(
+        MagnitudeTopKCIArch(k=2, has_position_axis=True, output_sites=model.site_names),
+        sites,
+        jax.random.PRNGKey(2),
+    )
+    decomposition = Decomposition(
+        components=init_component_stacks(sites, jax.random.PRNGKey(1)), ci_fn=ci_fn
+    )
+    monkeypatch.setattr(
+        load_run,
+        "load_deliverable",
+        lambda *_args: SimpleNamespace(target=SimpleNamespace(), ci_fn=object()),
+    )
+    mesh = jax.sharding.Mesh(
+        np.asarray([jax.devices()[0]]).reshape(1, 1, 1),
+        ("replicate", "fsdp", "tp"),
+    )
+    monkeypatch.setattr(load_run, "hsdp_mesh", lambda *_args: mesh)
+    placed = PlacedModel(model=model, placement=placement.from_config("ddp", mesh, model.sites))
+    monkeypatch.setattr(load_run, "build_target", lambda *_args: placed)
+    monkeypatch.setattr(load_run, "_restore_decomposition", lambda *_args: (decomposition, 7))
+
+    run = load_run.open_jax_run(tmp_path / "p-topk", data_root=tmp_path)
+    assert run.step == 7
+    assert run.ci_fn.fn == ci_fn
+    assert jax.tree.leaves(run.ci_fn) == []

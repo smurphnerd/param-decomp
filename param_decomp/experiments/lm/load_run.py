@@ -42,7 +42,7 @@ from param_decomp.targets import llama_simple_mlp
 from param_decomp.targets.glu_transformer import GLUDecomposedModel, glu_site_specs
 from param_decomp.vendored_jax.llama import AttentionImplementation
 
-LMCIFn = ChunkwiseTransformerCIFn | GlobalMLPCIFn
+LMCIFn = ChunkwiseTransformerCIFn | GlobalMLPCIFn | MagnitudeTopKCIFn
 
 
 def _with_attention_implementation(
