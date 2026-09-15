@@ -45,7 +45,11 @@ from param_decomp.core.ci_fn import (
     evaluate_compute_ci,
     materialize_ci_compute_weights,
 )
-from param_decomp.core.components import ComponentStacks
+from param_decomp.core.components import (
+    ComponentProjection,
+    ComponentStacks,
+    no_component_projection,
+)
 from param_decomp.core.configs import LossCoeff
 from param_decomp.core.decomposed_linear import constrain_component_activation
 from param_decomp.core.faithfulness import FaithfulnessLossFn
@@ -914,6 +918,7 @@ def apply_gradients(
     train_frac: Array,
     freq_ema: dict[str, Array] | None,
     mesh: Mesh | None,
+    component_projection: ComponentProjection,
 ) -> tuple[TrainState, dict[str, Array]]:
     """The optimizer tail: grad-norm metrics, each adversary's final ascent from the
     fused graph (SPEC S13'/S14': the source path is never coeff-scaled, so the
@@ -938,7 +943,9 @@ def apply_gradients(
         training.ci_fn_opt_state,
         eqx.filter(decomposition.ci_fn, eqx.is_array),
     )
-    new_components = eqx.apply_updates(decomposition.components, components_updates)
+    new_components = component_projection(
+        eqx.apply_updates(decomposition.components, components_updates)
+    )
     new_ci_fn = eqx.apply_updates(decomposition.ci_fn, ci_fn_updates)
 
     new_state = TrainState(
@@ -1017,6 +1024,7 @@ def make_train_step[PreparedT](
     ci_fn_optimizer: optax.GradientTransformation,
     total_steps: int,
     faithfulness: FaithfulnessLossFn,
+    component_projection: ComponentProjection = no_component_projection,
     compiler_options: dict[str, bool | int | str] | None = None,
 ):
     """Build the plain VPD step from its forward substrate and objective."""
@@ -1215,6 +1223,7 @@ def make_train_step[PreparedT](
             train_frac,
             freq_ema=new_freq_ema,
             mesh=substrate.mesh,
+            component_projection=component_projection,
         )
         metrics = (
             shared_step_metrics(
@@ -1568,6 +1577,7 @@ def make_targeted_train_step[PreparedT](
             train_frac,
             freq_ema=None,
             mesh=substrate.mesh,
+            component_projection=no_component_projection,
         )
         wd_metrics: dict[str, Array] = {}
         if ci_scaled_weight_decay is not None:
@@ -1604,6 +1614,7 @@ def make_faith_warmup_step(
     opt: optax.GradientTransformation,
     faithfulness: FaithfulnessLossFn,
     compiler_options: dict[str, bool | int | str] | None = None,
+    component_projection: ComponentProjection = no_component_projection,
 ) -> Callable[
     [PlacedModel, ComponentStacks, optax.OptState],
     tuple[ComponentStacks, optax.OptState, Array],
@@ -1619,6 +1630,7 @@ def make_faith_warmup_step(
 
         loss, grad = eqx.filter_value_and_grad(loss_fn)(components)
         updates, opt_state = opt.update(grad, opt_state, eqx.filter(components, eqx.is_array))
-        return eqx.apply_updates(components, updates), opt_state, loss
+        updated = eqx.apply_updates(components, updates)
+        return component_projection(updated), opt_state, loss
 
     return filter_jit(warmup_step, compiler_options=compiler_options)

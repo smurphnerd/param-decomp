@@ -291,6 +291,17 @@ goes through it. The mask is emitted as the CI preactivations, so `lower = upper
 exactly (SPEC S5 holds). The mask is constant with respect to the loss's differentiated
 leaves; gradient reaches V only through the kept coefficients in the masked forward.
 
+To match the usual TopK-SAE decoder constraint, opt into the S37 component projection:
+
+```yaml
+pd:
+  component_projection: {type: unit_decoder_rows}
+```
+
+It unit-normalizes every U row after initialization and each warmup/main update, while
+reciprocally scaling V so every rank-one component and VU are unchanged. The default is
+`{type: none}` and preserves the canonical VPD trajectory.
+
 The SAE-style head-reconstruction objective is then:
 
 ```yaml

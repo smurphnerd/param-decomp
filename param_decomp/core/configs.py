@@ -863,10 +863,37 @@ class PDConfigBase(BaseConfig):
     )
 
 
+class NoComponentProjectionConfig(BaseConfig):
+    """Leave the V/U scale gauge unconstrained (the canonical VPD trajectory)."""
+
+    type: Literal["none"] = "none"
+
+
+class UnitDecoderRowsProjectionConfig(BaseConfig):
+    """After each V/U update, unit-normalize every U row and reciprocally scale its V
+    column. This preserves every rank-one component and VU while fixing the scale gauge."""
+
+    type: Literal["unit_decoder_rows"] = "unit_decoder_rows"
+
+
+ComponentProjectionConfig = Annotated[
+    NoComponentProjectionConfig | UnitDecoderRowsProjectionConfig,
+    Discriminator("type"),
+]
+
+
 class PDConfig(PDConfigBase):
     """The plain-VPD algorithm shape: the full loss vocabulary + the faithfulness warmup."""
 
     type: Literal["faithful"] = "faithful"
+    component_projection: ComponentProjectionConfig = Field(
+        default_factory=NoComponentProjectionConfig,
+        description=(
+            "Optional post-update V/U gauge projection. `none` keeps the canonical VPD "
+            "trajectory; `unit_decoder_rows` matches the unit-row decoder constraint used "
+            "by common SAE trainers without changing VU."
+        ),
+    )
 
     loss_metrics: list[AnyLossMetricConfig] = Field(
         ...,

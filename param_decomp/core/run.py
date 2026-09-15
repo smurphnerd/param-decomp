@@ -55,17 +55,24 @@ from param_decomp.core.ci_fn import (
     PlacedCIFn,
     resolve_ci_placement,
 )
-from param_decomp.core.components import init_component_stacks
+from param_decomp.core.components import (
+    ComponentProjection,
+    init_component_stacks,
+    no_component_projection,
+    project_unit_u_rows,
+)
 from param_decomp.core.configs import (
     AnyPDConfig,
     Cadence,
     Checkpointing,
     NoCheckpointing,
+    NoComponentProjectionConfig,
     NontargetConfig,
     PDConfig,
     PDConfigBase,
     PeriodicCheckpointing,
     TargetedPDConfig,
+    UnitDecoderRowsProjectionConfig,
     flatten_typed_lists,
 )
 from param_decomp.core.eval_schedule import EvalSchedule, eval_due
@@ -554,6 +561,14 @@ class BackgroundRenderer:
         self._thread.start()
 
 
+def _component_projection(pd: PDConfig) -> ComponentProjection:
+    match pd.component_projection:
+        case NoComponentProjectionConfig():
+            return no_component_projection
+        case UnitDecoderRowsProjectionConfig():
+            return project_unit_u_rows
+
+
 @dataclasses.dataclass(frozen=True)
 class FaithfulnessWarmup:
     """SPEC S21's warmup phase as the engine consumes it — built by the PLAIN entry from
@@ -583,6 +598,7 @@ def _init_or_restore_state(
     compiler_options: dict[str, bool | int | str],
     faith_warmup: FaithfulnessWarmup | None,
     profiling: ProfilingMode | None,
+    component_projection: ComponentProjection = no_component_projection,
 ) -> tuple[TrainState, int] | None:
     """The shared init/restore/finetune/faith-warmup phase (SPEC S21/S22/S33).
 
@@ -594,6 +610,13 @@ def _init_or_restore_state(
     state = _ensure_global(
         init_train_state(pd, model, ci_fn_arch, positions, opt_vu, opt_ci, init_key, src_key),
         mesh,
+    )
+    state = dataclasses.replace(
+        state,
+        decomposition=dataclasses.replace(
+            state.decomposition,
+            components=component_projection(state.decomposition.components),
+        ),
     )
 
     restored = restore_latest(checkpoint_manager, state) if checkpoint_manager is not None else None
@@ -623,6 +646,13 @@ def _init_or_restore_state(
         # composition root before this engine is entered.
         prov = run.resume_provenance
         state = init_from_parent(prov.parent_run_dir / "ckpts", prov.parent_step, state)
+        state = dataclasses.replace(
+            state,
+            decomposition=dataclasses.replace(
+                state.decomposition,
+                components=component_projection(state.decomposition.components),
+            ),
+        )
         if checkpoint_manager is not None and not isinstance(profiling, JaxProfilerTrace):
             save_state(checkpoint_manager, 0, state)
         if is_main:
@@ -641,7 +671,10 @@ def _init_or_restore_state(
             eqx.filter(state.decomposition.components, eqx.is_array)
         )
         faith_warmup_step = make_faith_warmup_step(
-            faith_warmup_optimizer, faith_warmup.loss, compiler_options
+            faith_warmup_optimizer,
+            faith_warmup.loss,
+            compiler_options,
+            component_projection,
         )
         warmed_components = state.decomposition.components
         t0 = time.time()
@@ -748,6 +781,7 @@ def _prepare_run(
     is_main: bool,
     faith_warmup: FaithfulnessWarmup | None,
     profiling: ProfilingMode | None,
+    component_projection: ComponentProjection = no_component_projection,
 ) -> _PreparedRun | None:
     """Everything before the train loop: mesh activation, optimizers, keys, checkpoint
     manager, the placement audit, and init/restore/finetune/faith-warmup. Returns `None`
@@ -800,6 +834,7 @@ def _prepare_run(
         compiler_options=compiler_options,
         faith_warmup=faith_warmup,
         profiling=profiling,
+        component_projection=component_projection,
     )
     if init is None:
         return None  # SIGTERM mid-warmup: clean exit for requeue
@@ -879,6 +914,7 @@ def run_decomposition_training[EvalContextT](
         else None
     )
     objective = build_objective(pd.loss_metrics, model.site_names)
+    component_projection = _component_projection(pd)
     prepared = _prepare_run(
         pd=pd,
         cadence=cadence,
@@ -890,6 +926,7 @@ def run_decomposition_training[EvalContextT](
         is_main=is_main,
         faith_warmup=faith_warmup,
         profiling=profiling,
+        component_projection=component_projection,
     )
     if prepared is None:
         return
@@ -909,6 +946,7 @@ def run_decomposition_training[EvalContextT](
         ci_fn_optimizer=prepared.opt_ci,
         total_steps=pd.steps,
         faithfulness=faithfulness,
+        component_projection=component_projection,
         compiler_options=compiler_options,
     )
 

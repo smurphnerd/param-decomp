@@ -2,10 +2,12 @@
 
 import equinox as eqx
 import jax.numpy as jnp
+import numpy as np
 import optax
 import pytest
 from jax import random
 
+from param_decomp.core.components import project_unit_u_rows
 from param_decomp.core.configs import (
     FaithfulnessLossConfig,
     SmoothL0ImportanceMinimalityLossConfig,
@@ -99,6 +101,12 @@ def test_faith_warmup_uses_target_relative_faithfulness():
     faithfulness = make_faithfulness_loss(((SITE, SITE, 0),), {SITE: (2.5,)})
     expected = float(faithfulness(model.weight_deltas(components)))
     opt = optax.adamw(1e-2, weight_decay=0.0)
-    warmup_step = make_faith_warmup_step(opt, faithfulness)
-    _, _, loss = warmup_step(placed, components, opt.init(eqx.filter(components, eqx.is_array)))
+    warmup_step = make_faith_warmup_step(
+        opt, faithfulness, component_projection=project_unit_u_rows
+    )
+    projected, _, loss = warmup_step(
+        placed, components, opt.init(eqx.filter(components, eqx.is_array))
+    )
     assert float(loss) == pytest.approx(expected, rel=1e-5)
+    for _name, site in projected.sites_items():
+        np.testing.assert_allclose(np.linalg.norm(np.asarray(site.U), axis=-1), 1.0, atol=1e-6)

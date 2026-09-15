@@ -20,7 +20,7 @@ from param_decomp.core.ci_fn import (
     evaluate_ci,
     exact_top_k_mask,
 )
-from param_decomp.core.components import SiteC, init_component_stacks
+from param_decomp.core.components import SiteC, init_component_stacks, project_unit_u_rows
 from param_decomp.core.configs import (
     CIMaskedReconLossConfig,
     FaithfulnessLossConfig,
@@ -104,7 +104,7 @@ def test_forward_for_ci_merges_captures_with_component_taps():
     assert set(taps) == ci_fn.capture_keys
 
 
-def test_train_step_moves_v_and_leaves_no_ci_fn_parameters():
+def test_train_step_moves_v_projects_u_and_leaves_no_ci_fn_parameters():
     _, model, _, ci_fn, vu, tokens = _setup()
     opt_vu = optax.adam(1e-2)
     opt_ci = optax.adam(1e-3)
@@ -150,6 +150,7 @@ def test_train_step_moves_v_and_leaves_no_ci_fn_parameters():
         ci_fn_optimizer=opt_ci,
         total_steps=10,
         faithfulness=faithfulness_loss_for(model.model),
+        component_projection=project_unit_u_rows,
     )
     # The step donates its state buffers; keep a host copy of V/U for the comparison.
     before = [np.asarray(leaf) for leaf in jax.tree.leaves(eqx.filter(vu, eqx.is_array))]
@@ -160,6 +161,8 @@ def test_train_step_moves_v_and_leaves_no_ci_fn_parameters():
     after = jax.tree.leaves(eqx.filter(new_state.decomposition.components, eqx.is_array))
     assert any(not np.allclose(a, np.asarray(b)) for a, b in zip(before, after, strict=True))
     assert new_state.decomposition.ci_fn == ci_fn
+    for _name, site in new_state.decomposition.components.sites_items():
+        np.testing.assert_allclose(np.linalg.norm(np.asarray(site.U), axis=-1), 1.0, atol=1e-5)
 
 
 def test_checkpoint_round_trips_a_parameter_free_ci_fn(tmp_path: Path):

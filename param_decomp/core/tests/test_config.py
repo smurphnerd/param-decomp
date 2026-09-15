@@ -20,6 +20,7 @@ from param_decomp.core.configs import (
     ImportanceMinimalityLossConfig,
     PersistentPGDReconLossConfig,
     PGDReconLossConfig,
+    UnitDecoderRowsProjectionConfig,
 )
 from param_decomp.core.losses import scheduled_value_traced
 from param_decomp.core.objective import build_objective
@@ -69,6 +70,16 @@ def test_b128_config_converts():
         "StochasticReconSubsetLoss",
         "PersistentPGDReconLoss",
     ]
+
+
+def test_component_projection_defaults_off_and_parses_unit_decoder_rows():
+    raw = _reference_lm_raw()
+    default = LMExperimentConfig.model_validate(raw)
+    assert default.pd.component_projection.type == "none"
+
+    raw["pd"]["component_projection"] = {"type": "unit_decoder_rows"}
+    projected = LMExperimentConfig.model_validate(raw)
+    assert isinstance(projected.pd.component_projection, UnitDecoderRowsProjectionConfig)
 
 
 def test_implicit_faithful_config_still_requires_exactly_one_faithfulness_term():

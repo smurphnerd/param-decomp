@@ -9,7 +9,7 @@ live here rather than inside `model.py` (whose `DecomposedModel` Protocol refere
 business, above: `decomposed_linear.site_forward`.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from functools import cache
 from typing import ClassVar, Generic
@@ -216,3 +216,26 @@ def init_component_stacks(sites: tuple[SiteSpec, ...], key: Array) -> ComponentS
     the stacked persistence layout; the weight-delta channel carries the faithfulness
     residual at init (before faithfulness warmup)."""
     return ComponentStacks(stacks=init_stack_arrays(sites, key), site_slots=site_slots_for(sites))
+
+
+ComponentProjection = Callable[[ComponentStacks[Array]], ComponentStacks[Array]]
+
+
+def no_component_projection(components: ComponentStacks[Array]) -> ComponentStacks[Array]:
+    """The byte-inert default component update rule."""
+    return components
+
+
+def project_unit_u_rows(components: ComponentStacks[Array]) -> ComponentStacks[Array]:
+    """Set every U row to unit norm and reciprocally scale its V column.
+
+    Per component, ``(V_i * ||U_i||) (U_i / ||U_i||) = V_i U_i``. The projection fixes
+    the V/U scale gauge without changing any rank-one component, VU, or masked forward.
+    It refuses a zero U row because that component has no equivalent unit-row gauge.
+    """
+    stacks: dict[str, tuple[Array, Array]] = {}
+    for group, (vs, us) in components.stacks.items():
+        norms = jnp.linalg.norm(us, axis=-1)
+        norms = eqx.error_if(norms, jnp.any(norms == 0), f"{group}: zero decoder row")
+        stacks[group] = (vs * norms[:, None, :], us / norms[:, :, None])
+    return ComponentStacks(stacks=stacks, site_slots=components.site_slots)
